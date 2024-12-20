@@ -1,0 +1,14 @@
+
+Geospatial Data Visualization as follows:
+aorcVisualizations.py, ornlVisualizations.py, snodasViasualizations.py, spatialVisualizations.py, topographical.py, fireVisualization.py
+
+Data Preprocessing:
+-> To create finalDf.nc (meteorological dataset), run createDF.py
+-> fixnans.py accounts for NaN values in SWE data
+-> To create fire_modified.nc (burn area dataset), run fireWrite.py
+-> Static_data_all.nc contains all topographical static data
+
+Model Training:
+-> mergeData.py combines Static_data_all.nc and finalDf.nc to one comprehensive dataset
+-> verifyingAlignment.py ensures that the spatial resolution of the dataframe is consistent
+-> correlationMatrix.py provides a correlation heatmap for the features
