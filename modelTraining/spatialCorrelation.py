@@ -1,58 +1,62 @@
-import seaborn as sns
-import pandas as pd
-import matplotlib.pyplot as plt
 import xarray as xr
-import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
 
-# Load the NetCDF data
-data_path = '/Users/yashnilmohanty/Desktop/combined_data.nc'
-ds = xr.open_dataset(data_path)
+# Load the processed NetCDF file
+file_path = '/Users/yashnilmohanty/Desktop/preprocessed_combined_data.nc'  # Update with your actual file path
+data = xr.open_dataset(file_path)
 
-# Define feature and target variables
-static_features = ['Elevation', 'slope', 'VegTyp', 'aspect_ratio']
-time_features = [
+# List of variables
+variables = [
+    'Elevation', 'slope', 'VegTyp', 'aspect_ratio',
     'aorcFallTemperature', 'aorcFallRain', 'aorcFallHumidity', 'aorcFallLongwave', 'aorcFallShortwave',
     'aorcSpringTemperature', 'aorcSpringRain', 'aorcSpringHumidity', 'aorcSpringLongwave', 'aorcSpringShortwave',
     'aorcSummerTemperature', 'aorcSummerRain', 'aorcSummerHumidity', 'aorcSummerLongwave', 'aorcSummerShortwave',
     'aorcWinterTemperature', 'aorcWinterRain', 'aorcWinterHumidity', 'aorcWinterLongwave', 'aorcWinterShortwave',
-    'sweSpring', 'sweWinter'
+    'sweSpring', 'sweWinter', 'DOD'
 ]
-target_var = 'DOD'
 
-# Prepare Static Data
-static_data = []
-for var in static_features:
-    static_data.append(ds[var].values.flatten())  # Flatten Geo2D data
-X_static = np.array(static_data).T  # Transpose to shape (n_samples, n_features)
+# Determine the number of spatial points
+num_pixels = data.dims['npixels']
 
-# Prepare Time-Series Data
-n_years = 15
-n_seasons = 4
-time_data = []
+# Separate variables based on their time dimension
+year_variables = [var for var in variables if 'year' in data[var].dims]
+nyears_variables = [var for var in variables if 'nyears' in data[var].dims]
 
-for var in time_features:
-    # Stack the seasonal data for all years
-    time_data.append(ds[var].values.reshape(n_years, -1))  # Reshape to (n_years, n_samples_per_year)
+# Compute the spatial mean across years for `year` variables
+spatial_year_data = {
+    var: data[var].mean(dim='year').values.flatten() for var in year_variables
+}
 
-X_time = np.stack(time_data, axis=-1)  # Shape: (n_years, n_samples_per_year, n_features)
+# Ensure `nyears` variables are reduced to 1D arrays
+spatial_nyears_data = {
+    var: data[var].values.flatten() for var in nyears_variables
+}
 
-# Average over seasons for simplicity (optional)
-time_series_avg = X_time.mean(axis=0)  # Shape: (n_samples, n_features)
+# Combine the two dictionaries
+spatial_data = {**spatial_year_data, **spatial_nyears_data}
 
-# Target Variable (flatten to align with static and time-series data)
-y = ds[target_var].values.flatten()
+# Ensure all arrays have the same length
+for var, values in spatial_data.items():
+    if len(values) != num_pixels:
+        print(f"Variable '{var}' has length {len(values)}, expected {num_pixels}. Fixing...")
+        spatial_data[var] = values[:num_pixels]  # Trim excess or pad with NaNs
+        spatial_data[var] = spatial_data[var].tolist()  # Convert to list for uniformity
 
-# Combine static and time-series data into a DataFrame
-static_df = pd.DataFrame(X_static, columns=static_features)
-time_series_df = pd.DataFrame(time_series_avg, columns=time_features)
-combined_df = pd.concat([static_df, time_series_df], axis=1)
-combined_df['DOD'] = y  # Add the target variable
+# Create a DataFrame for spatial data (rows: coordinates, columns: variables)
+spatial_df = pd.DataFrame(spatial_data)
 
-# Compute Correlation Matrix
-correlation_matrix = combined_df.corr()
+# Compute the correlation matrix
+correlation_matrix = spatial_df.corr()
 
-# Plot Heatmap
-plt.figure(figsize=(12, 8))
-sns.heatmap(correlation_matrix, annot=False, cmap='coolwarm', fmt='.2f', vmin=-1, vmax=1)
-plt.title('Correlation Heatmap')
+# Plot the heatmap
+plt.figure(figsize=(12, 10))
+sns.heatmap(correlation_matrix, annot=False, fmt='.2f', cmap='coolwarm', cbar=True, square=True)
+plt.title('Spatial Correlation Heatmap of Variables')
+plt.xticks(rotation=45, ha='right')
+plt.yticks(rotation=0)
+plt.tight_layout()
+
+# Show the plot
 plt.show()
