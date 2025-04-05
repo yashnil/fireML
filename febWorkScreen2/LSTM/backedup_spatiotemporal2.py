@@ -96,15 +96,13 @@ def compute_burn_cumsum_with_initial(ds, pre_burn):
 def gather_spatiotemporal_features(ds, target_var="DOD"):
     """
     Collects all data_vars except the target, lat, lon, etc.
-    Also excludes 'burn_fraction' so it's not used as a predictor.
     Returns a dict of {varName -> 2D array (year, pixel)}.
     If the variable is only (pixel,) we tile it across years.
     """
     exclude_vars = {
         target_var.lower(),
         'lat','lon','latitude','longitude',
-        'pixel','year','ncoords_vector','nyears_vector',
-        'burn_fraction'  # explicitly exclude burn_fraction
+        'pixel','year','ncoords_vector','nyears_vector'
     }
     all_feats = {}
     ny = ds.dims['year']
@@ -318,6 +316,8 @@ def compute_permutation_importance_lstm(
 
     importances = np.zeros(n_features, dtype=float)
 
+    # We'll shuffle each feature in the 2D form,
+    # but re-reshape before calling predict.
     X_val_perm = np.copy(X_val)
     for f_idx in range(n_features):
         scores = []
@@ -365,12 +365,7 @@ def plot_top5_feature_scatter(feat_importances, X_valid_raw, y_valid_raw, cat_va
                               feat_names, title_prefix="(thr=0)"):
     """
     Takes the raw (unscaled) X_valid, y_valid, identifies top-5 features by the
-    permutation importances, then scatterplots feature vs. DoD (colored by category).
-    
-    [Updated to match random forest code changes]:
-      - Remove best-fit line
-      - Show correlation (r) in legend title
-      - Use smaller marker size (s=10)
+    permutation importances array, then scatterplots feature vs. DoD (colored by category).
     """
     importances = np.array(feat_importances)
     idx_sorted = np.argsort(importances)[::-1]
@@ -388,23 +383,25 @@ def plot_top5_feature_scatter(feat_importances, X_valid_raw, y_valid_raw, cat_va
             plt.scatter(
                 y_valid_raw[sel_c],
                 feat_vals[sel_c],
-                c=ccolor, alpha=0.4, s=10,  # smaller points
-                label=f"cat={cval}"
+                c=ccolor, alpha=0.4, label=f"cat={cval}"
             )
-
-        # Compute correlation (across all valid points for this feature)
-        mask_lin = np.isfinite(y_valid_raw) & np.isfinite(feat_vals)
+        # line of best fit => across ALL data
+        x_all = y_valid_raw
+        y_all = feat_vals
+        mask_lin = np.isfinite(x_all) & np.isfinite(y_all)
         if np.sum(mask_lin) > 2:
-            r_val = np.corrcoef(y_valid_raw[mask_lin], feat_vals[mask_lin])[0,1]
-        else:
-            r_val = np.nan
-
-        # Put correlation in the legend title
-        plt.legend(title=f"r={r_val:.2f}", loc="best")
+            x_lin = x_all[mask_lin]
+            y_lin = y_all[mask_lin]
+            p = np.polyfit(x_lin, y_lin, 1)  # slope, intercept
+            x_min, x_max = np.min(x_lin), np.max(x_lin)
+            x_vals = np.linspace(x_min, x_max, 100)
+            y_fit  = np.polyval(p, x_vals)
+            plt.plot(x_vals, y_fit, 'k--', label=f"Best fit (y={p[0]:.2f}x+{p[1]:.2f})")
 
         plt.xlabel("Observed DOD (raw)")
         plt.ylabel(f"{fname} (raw)")
         plt.title(f"{title_prefix}: Feature={fname}")
+        plt.legend()
         plt.tight_layout()
         plt.show()
 
@@ -457,6 +454,8 @@ def run_spatiotemporal_experiment_lstm(
     print(f" [LSTM] cat <= {unburned_max_cat}, #train={len(X_train_raw)}, #test={len(X_test_raw)}")
 
     # 4) Scale X and y
+    #    Fit scalers on TRAIN, apply to both TRAIN and TEST,
+    #    then also to "valid" for final predictions.
     xscaler = StandardScaler()
     yscaler = StandardScaler()
 
@@ -467,7 +466,8 @@ def run_spatiotemporal_experiment_lstm(
     y_test_sc  = yscaler.transform(y_test_raw.reshape(-1,1)).ravel()
 
     X_valid_sc = xscaler.transform(X_valid_raw)
-    # We'll invert predictions for final scatter, so keep y_valid_raw as is.
+    # We do NOT transform y_valid for final scatter yet, but for predictions we do:
+    # We'll invert the predictions later so we can compare on the raw scale.
 
     # 5) Reshape to (N, 1, n_features) for LSTM
     n_features = X_train_sc.shape[1]
@@ -497,7 +497,9 @@ def run_spatiotemporal_experiment_lstm(
 
     # ========== Evaluate on train (unburned) ==========
     y_pred_train_sc = model.predict(X_train_3D, batch_size=batch_size).squeeze()
+    # invert scale
     y_pred_train = yscaler.inverse_transform(y_pred_train_sc.reshape(-1,1)).ravel()
+    # Plot
     plot_scatter(y_train_raw, y_pred_train,
         title=f"LSTM Unburned Train (cat<={unburned_max_cat})")
     plot_bias_hist(y_train_raw, y_pred_train,
@@ -546,10 +548,11 @@ def run_spatiotemporal_experiment_lstm(
                    title=f"LSTM Bias Hist: All Data (thr={unburned_max_cat})")
 
     # ========== Permutation-based feature importance ==========
-    # We'll compute it on the unburned TEST subset
+    # We'll compute it on the unburned TEST subset for simplicity:
+    # Use the scaled test set
     perm_importances = compute_permutation_importance_lstm(
         model,
-        X_test_sc,
+        X_test_sc,  # shape (N, n_features) in scaled space
         y_test_sc,
         batch_size=batch_size
     )
@@ -564,8 +567,8 @@ def run_spatiotemporal_experiment_lstm(
     cat_flat_all = cat_2d.ravel(order='C')[valid_mask]
     plot_top5_feature_scatter(
         perm_importances,
-        X_valid_raw,
-        y_valid_raw,
+        X_valid_raw,  # raw
+        y_valid_raw,  # raw
         cat_flat_all,
         feat_names,
         title_prefix=f"(thr={unburned_max_cat})"
@@ -580,10 +583,11 @@ if __name__=="__main__":
 
     # 1) LOAD/COMPUTE PRE-BURN
     path_pat = "/Users/yashnilmohanty/Desktop/data/BurnArea_Data/Merged_BurnArea_{year:04d}{month:02d}.nc"
+
     pre_burn  = compute_pre2004_burn(coords, path_pat, 2001, 2003)
 
-    # 2) LOAD DS => updated to final_dataset3.nc
-    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset3.nc")
+    # 2) LOAD DS
+    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset2.nc")
 
     # 3) cumsum burn fraction
     cumsum_2d = compute_burn_cumsum_with_initial(ds, pre_burn)
@@ -601,7 +605,7 @@ if __name__=="__main__":
         X_all, y_all, valid_mask, cat_2d,
         ds=ds, feat_names=feat_names,
         unburned_max_cat=0,   # cat=0 is considered unburned
-        epochs=100,           
+        epochs=100,            # more epochs to ensure better convergence
         batch_size=512
     )
 

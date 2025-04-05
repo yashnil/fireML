@@ -92,12 +92,13 @@ def compute_burn_cumsum_with_initial(ds, pre_burn):
 def gather_spatiotemporal_features(ds, target_var="DOD"):
     """
     Collect 2D (year,pixel) or 1D (pixel) variables as features. 
-    Excludes the target and lat/lon placeholders.
+    Excludes the target, lat/lon placeholders, and 'burn_fraction'.
     """
     exclude_vars = {
         target_var.lower(),
         'lat','lon','latitude','longitude',
-        'pixel','year','ncoords_vector','nyears_vector'
+        'pixel','year','ncoords_vector','nyears_vector',
+        'burn_fraction'  # exclude burn_fraction from features
     }
     all_feats = {}
     ny = ds.dims['year']
@@ -232,7 +233,6 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title="Scatter by Category"):
     plt.tight_layout()
     plt.show()
 
-
 ########################
 # BIAS HIST
 ########################
@@ -324,7 +324,9 @@ def plot_top5_feature_scatter(importances, X_valid, y_valid, cat_valid, feat_nam
        - x-axis = Observed DOD
        - y-axis = Feature Value
        - Color-coded by category (0..3)
-       - A dotted line of best fit for the entire data.
+       
+    [Updated to remove best-fit line, show correlation (r) in the legend, 
+     and use smaller point size s=10]
     """
     importances_arr = np.array(importances)
     idx_sorted = np.argsort(importances_arr)[::-1]  # descending
@@ -345,26 +347,23 @@ def plot_top5_feature_scatter(importances, X_valid, y_valid, cat_valid, feat_nam
                 feat_vals[sel_c],
                 c=ccolor,
                 alpha=0.4,
+                s=10,  # smaller points
                 label=f"cat={cval}"
             )
 
-        # line of best fit => across ALL data
-        x_all = y_valid
-        y_all = feat_vals
-        mask_lin = np.isfinite(x_all) & np.isfinite(y_all)
+        # Compute correlation (across ALL data)
+        mask_lin = np.isfinite(y_valid) & np.isfinite(feat_vals)
         if np.sum(mask_lin) > 2:
-            x_lin = x_all[mask_lin]
-            y_lin = y_all[mask_lin]
-            p = np.polyfit(x_lin, y_lin, 1)  # slope, intercept
-            x_min, x_max = np.min(x_lin), np.max(x_lin)
-            x_vals = np.linspace(x_min, x_max, 100)
-            y_fit  = np.polyval(p, x_vals)
-            plt.plot(x_vals, y_fit, 'k--', label=f"Fit y={p[0]:.2f}x+{p[1]:.2f}")
+            r_val = np.corrcoef(y_valid[mask_lin], feat_vals[mask_lin])[0,1]
+        else:
+            r_val = np.nan
+
+        # Put correlation in the legend title
+        plt.legend(title=f"r={r_val:.2f}", loc="best")
 
         plt.xlabel("Observed DOD")
         plt.ylabel(f"{fname}")
         plt.title(f"{title_prefix}: Feature={fname}")
-        plt.legend()
         plt.tight_layout()
         plt.show()
 
@@ -382,7 +381,6 @@ def run_spatiotemporal_experiment_mlp(X_all, y_all, valid_mask, cat_2d,
       - hist
       - top-10 feature importances (permutation)
       - top-5 feature-value scatter
-    No boxplots, no spatial plots.
     """
     from sklearn.model_selection import train_test_split
     from sklearn.neural_network import MLPRegressor
@@ -411,7 +409,6 @@ def run_spatiotemporal_experiment_mlp(X_all, y_all, valid_mask, cat_2d,
     print(f"   unburned train={len(X_train)}, test={len(X_test)}")
 
     # 3) Define & Train MLP
-    #    Tweak hyperparams as needed
     mlp = MLPRegressor(
         hidden_layer_sizes=(64, 64),
         activation='relu',
@@ -485,8 +482,8 @@ if __name__=="__main__":
     path_pat = "/Users/yashnilmohanty/Desktop/data/BurnArea_Data/Merged_BurnArea_{year:04d}{month:02d}.nc"
     pre_burn  = compute_pre2004_burn(coords, path_pat, 2001, 2003)
 
-    # 2) LOAD DS
-    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset2.nc")
+    # 2) LOAD DS => now use final_dataset3.nc
+    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset3.nc")
 
     # 3) cumsum from 2004 onward (with pre‐burn)
     cumsum_2d = compute_burn_cumsum_with_initial(ds, pre_burn)
