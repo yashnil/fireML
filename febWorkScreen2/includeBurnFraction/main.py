@@ -13,11 +13,12 @@ from sklearn.metrics import mean_squared_error, r2_score
 
 from scipy.stats import ranksums  # for Wilcoxon rank-sum tests
 import numpy.random as npr  # for random sampling in the final new step
+from typing import List, Tuple, Optional
 
 ############################################################
 # 0) LOAD COORDINATES
 ############################################################
-from obtainCoordinates import coords  # shape(n_pixels,2)
+from obtainCoordinates import coords  # shape(n_pixels, 2)
 
 ############################################################
 # 1) Pre-2004 Burn
@@ -31,22 +32,22 @@ def compute_pre2004_burn(coords, path_pattern, year_start=2001, year_end=2003):
     pre_burn = np.zeros((n_pixels,), dtype=np.float32)
 
     years = range(year_start, year_end + 1)
-    months= range(1, 13)
+    months = range(1, 13)
 
     for yr in years:
         for mm in months:
             file_path = path_pattern.format(year=yr, month=mm)
             ds_nc = xr.open_dataset(file_path)
             burn_2d = ds_nc["MTBS_BurnFraction"].values
-            lat_2d  = ds_nc["XLAT_M"].values
-            lon_2d  = ds_nc["XLONG_M"].values
+            lat_2d = ds_nc["XLAT_M"].values
+            lon_2d = ds_nc["XLONG_M"].values
 
             # Flatten
             flat_burn = burn_2d.ravel()
             flat_lat  = lat_2d.ravel()
             flat_lon  = lon_2d.ravel()
 
-            # Clamp fraction>1 => 1
+            # Clamp fraction > 1 => 1
             flat_burn = np.minimum(flat_burn, 1.0)
 
             # Remove NaNs
@@ -67,7 +68,7 @@ def compute_pre2004_burn(coords, path_pattern, year_start=2001, year_end=2003):
 
             ds_nc.close()
 
-    # final clamp => <=1.0
+    # final clamp => <= 1.0
     pre_burn = np.minimum(pre_burn, 1.0)
     return pre_burn
 
@@ -99,8 +100,8 @@ def gather_spatiotemporal_features(ds, target_var="DOD"):
     """
     exclude_vars = {
         target_var.lower(),
-        'lat','lon','latitude','longitude',
-        'pixel','year','ncoords_vector','nyears_vector'
+        'lat', 'lon', 'latitude', 'longitude',
+        'pixel', 'year', 'ncoords_vector', 'nyears_vector'
     }
     all_feats = {}
     n_years = ds.dims['year']
@@ -111,9 +112,11 @@ def gather_spatiotemporal_features(ds, target_var="DOD"):
         
         da = ds[var_name]
         dims = set(da.dims)
+        # If it's (year, pixel), keep as is
         if dims == {'year', 'pixel'}:
             arr2d = da.values
             all_feats[var_name] = arr2d
+        # If it's (pixel), replicate across all years
         elif dims == {'pixel'}:
             arr1d = da.values
             arr2d = np.tile(arr1d, (n_years,1))
@@ -224,11 +227,19 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title="Scatter by Category"):
     plt.show()
 
 ############################################################
-# 6) Additional Visualization: Pixel-level bias map, boxplot
+# 6) Additional Visualization
+#    (A) Original pixel-level bias map w/ high-res background
+#    (B) Boxplot by elev/veg
+#    (C) [NEW] Simple "grid" pixel-level bias map
+#    (D) [NEW] Mean predicted/observed DoD maps
 ############################################################
 def produce_pixel_bias_map_hr_background(ds, pixel_idx, y_true, y_pred,
         lat_var="latitude", lon_var="longitude",
         title="Pixel Bias: High-Res Background"):
+    """
+    Original function that uses Cartopy (Stamen terrain tiles) for a high-res background.
+    We'll keep this here for completeness, but we won't call it if we prefer a simpler approach.
+    """
     from matplotlib.colors import TwoSlopeNorm
     tiler = cimgt.Stamen('terrain')
     n_pixels = ds.dims["pixel"]
@@ -247,6 +258,7 @@ def produce_pixel_bias_map_hr_background(ds, pixel_idx, y_true, y_pred,
     lat_full = ds[lat_var].values
     lon_full = ds[lon_var].values
 
+    # Flatten lat/lon if stored as 2D
     if lat_full.ndim == 2:
         lat_1d_all = lat_full[0, :]
         lon_1d_all = lon_full[0, :]
@@ -258,6 +270,7 @@ def produce_pixel_bias_map_hr_background(ds, pixel_idx, y_true, y_pred,
     if np.isnan(max_abs):
         max_abs = 1.0
 
+    from matplotlib.colors import TwoSlopeNorm
     norm = TwoSlopeNorm(vmin=-max_abs, vcenter=0, vmax=max_abs)
 
     fig = plt.figure(figsize=(9,7))
@@ -268,6 +281,7 @@ def produce_pixel_bias_map_hr_background(ds, pixel_idx, y_true, y_pred,
     ax.add_feature(cfeature.BORDERS, linewidth=0.5, alpha=0.5)
     ax.add_feature(cfeature.STATES, linewidth=0.5, alpha=0.5)
 
+    # Plot pixels with no data in light gray
     ax.scatter(
         lon_1d_all, lat_1d_all,
         transform=ccrs.PlateCarree(),
@@ -311,6 +325,85 @@ def plot_boxplot_dod_by_elev_veg(y_dod, elev, vegtyp, cat_label="c0"):
     plt.xlabel("(ElevationBin, VegTyp)")
     plt.ylabel("Raw DoD")
     plt.title(f"{cat_label}: DoD vs. (Elev, Veg)")
+    plt.tight_layout()
+    plt.show()
+
+# (C) [NEW] Simple grid-based bias map (no Cartopy)
+def produce_pixel_bias_map_simple(ds, pixel_idx, y_true, y_pred,
+                                  lat_var="latitude", lon_var="longitude",
+                                  title="Pixel Bias: Simple Grid"):
+    """
+    A simpler pixel-level bias map that just does a scatter of (lon, lat) 
+    colored by mean bias. Does NOT use Cartopy or any background tiles.
+    """
+    from matplotlib.colors import TwoSlopeNorm
+
+    n_pixels = ds.dims["pixel"]
+    sum_bias = np.zeros(n_pixels, dtype=float)
+    count = np.zeros(n_pixels, dtype=float)
+
+    # Accumulate bias per pixel
+    residuals = y_pred - y_true
+    for i, px in enumerate(pixel_idx):
+        sum_bias[px] += residuals[i]
+        count[px] += 1
+    mean_bias = np.full(n_pixels, np.nan, dtype=float)
+    good = (count > 0)
+    mean_bias[good] = sum_bias[good] / count[good]
+
+    # Extract lat/lon as 1D
+    lat_full = ds[lat_var].values
+    lon_full = ds[lon_var].values
+    if lat_full.ndim == 2:
+        lat_1d = lat_full[0, :]
+        lon_1d = lon_full[0, :]
+    else:
+        lat_1d = lat_full
+        lon_1d = lon_full
+
+    # Figure out color scaling
+    vmax = np.nanmax(np.abs(mean_bias)) or 1.0
+    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
+
+    plt.figure(figsize=(7,6))
+    # All points in light gray
+    plt.scatter(lon_1d, lat_1d, c="lightgray", s=5, alpha=0.7, label="No Data")
+    # Points with actual data in bwr
+    sc = plt.scatter(lon_1d[good], lat_1d[good],
+                     c=mean_bias[good], cmap="bwr", norm=norm,
+                     s=10, alpha=0.9, label="Bias")
+
+    plt.colorbar(sc, shrink=0.8, label="Mean Bias (Pred - Obs)")
+    plt.xlabel("Longitude")
+    plt.ylabel("Latitude")
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+# (D) [NEW] Plot mean predicted or observed DoD
+def plot_mean_dod_map_simple(ds, mean_vals,
+                             lat_var="latitude", lon_var="longitude",
+                             title="Mean DoD"):
+    """
+    Simple scatter map of per-pixel mean DoD (predicted or observed),
+    again not using Cartopy.
+    """
+    lat_full = ds[lat_var].values
+    lon_full = ds[lon_var].values
+    if lat_full.ndim == 2:
+        lat_1d = lat_full[0, :]
+        lon_1d = lon_full[0, :]
+    else:
+        lat_1d = lat_full
+        lon_1d = lon_full
+
+    plt.figure(figsize=(7,6))
+    sc = plt.scatter(lon_1d, lat_1d, c=mean_vals, cmap="viridis", s=10, alpha=0.9)
+    plt.colorbar(sc, shrink=0.8, label="Mean DoD (days)")
+    plt.xlabel("Longitude")
+    plt.ylabel("Latitude")
+    plt.title(title)
     plt.tight_layout()
     plt.show()
 
@@ -369,11 +462,41 @@ def plot_top5_feature_scatter(rf_model, X_valid, y_valid, cat_valid, feat_names,
         plt.tight_layout()
         plt.show()
 
+# ------------------------------------------------------------------
+# 8‑A) **NEW** helper: metrics for arbitrary burn‑fraction bins
+# ------------------------------------------------------------------
+def evaluate_metrics_per_bin(y_true: np.ndarray,
+                              y_pred: np.ndarray,
+                              burn_vals: np.ndarray,
+                              bins: list[tuple[float, Optional[float]]],
+                              label: str = "BurnFrac") -> None:
+    """
+    Print RMSE / Bias / R² for each (lo, hi] interval in *bins*.
+    A *hi* of None means 'greater than lo'.
+    """
+    for lo, hi in bins:
+        if hi is None:                         # open upper bound
+            sel = burn_vals > lo
+            tag = f">{lo*100:.0f}%"
+        else:
+            sel = (burn_vals >= lo) & (burn_vals < hi)
+            tag = f"{lo*100:.0f}-{hi*100:.0f}%"
+        n = int(np.sum(sel))
+        if n == 0:
+            print(f"{label} {tag:>7}:  N=0 – skipped")
+            continue
+        rmse = np.sqrt(mean_squared_error(y_true[sel], y_pred[sel]))
+        bias = np.mean(y_pred[sel] - y_true[sel])
+        r2   = r2_score(y_true[sel], y_pred[sel]) if n > 1 else np.nan
+        print(f"{label} {tag:>7}:  N={n:5d}  RMSE={rmse:6.2f}  "
+              f"Bias={bias:7.2f}  R²={r2:6.3f}")
+
 ############################################################
 # 8) The NEW random forest experiment
 #    + Wilcoxon rank-sum test
-#    + [NEW] Additional test using the category with fewest samples
-#    + [NEW] Save the predicted/observed DoD arrays to .txt
+#    + Additional test using the category with fewest samples
+#    + Save predicted/observed DoD arrays to .txt
+#    + Now we add simpler spatial maps for bias + mean predicted/observed
 ############################################################
 def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_names):
     cat_flat_all = cat_2d.ravel(order='C')  
@@ -447,7 +570,7 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
                 print(f"No test data for cat={cval}, skipping rank-sum vs c0.")
 
     # -----------------------------------------------
-    # [NEW] Additional "downsampling" test
+    # Additional "downsampling" test
     # -----------------------------------------------
     test_counts = {}
     for cval in [0,1,2,3]:
@@ -457,18 +580,18 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
             test_counts[cval] = n_c
 
     if not test_counts:
-        print("[NEW] No test data for any category => cannot do downsampling test.")
+        print("No test data => cannot do downsampling test.")
     else:
         minCat   = min(test_counts, key=test_counts.get)
         minCount = test_counts[minCat]
-        print(f"[NEW] The category with fewest test samples is c{minCat}, count={minCount}")
+        print(f"The category with fewest test samples is c{minCat}, count={minCount}")
 
         n_runs = 10
         for cval in test_counts:
             c_mask = (cat_test == cval)
             idx_c  = np.where(c_mask)[0]
             if len(idx_c) < minCount:
-                print(f"[NEW] Category {cval} has <{minCount} points => skip sampling.")
+                print(f"Category {cval} has <{minCount} points => skip sampling.")
                 continue
 
             biases_list = []
@@ -485,11 +608,11 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
 
             avg_bias = np.mean(biases_list)
             avg_rmse = np.mean(rmse_list)
-            print(f"[NEW] Category c{cval}: from 10 random subsamples of size={minCount},"
-                  f" mean bias={avg_bias:.3f}, mean RMSE={avg_rmse:.3f}")
+            print(f"Category c{cval}: from 10 random subsamples (size={minCount}), "
+                  f"mean bias={avg_bias:.3f}, mean RMSE={avg_rmse:.3f}")
 
     # -----------------------------------------------
-    # [NEW] Save predicted + observed DoD to .txt
+    # Save predicted + observed DoD to .txt
     # -----------------------------------------------
     # We'll do this per-category in the TEST set
     for cval in [0,1,2,3]:
@@ -528,12 +651,30 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
     plot_scatter_by_cat(y_test, y_pred_test, cat_test,
                         title="RF: All Test Data, color by cat")
 
-    # Pixel-level bias map
+    # ---------- *NEW* 10 % burn‑fraction‑bin evaluation -------------
+    if "burn_fraction" in feat_names:
+        burn_idx = feat_names.index("burn_fraction")
+        burn_test = X_test[:, burn_idx]      # per‑sample instantaneous burn fraction
+
+        ten_pct_bins = [(0.0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.4),
+                        (0.4, 0.5), (0.5, 0.6), (0.6, 0.7), (0.7, 0.8),
+                        (0.8, 0.9), (0.9, None)]
+
+        print("\n=== Performance by *10 %* burn‑fraction bins (Test set) ===")
+        evaluate_metrics_per_bin(y_test, y_pred_test, burn_test, ten_pct_bins)
+    else:
+        print("[WARN] 'burn_fraction' not in feature list – skipping 10 %‑bin metrics.")
+
+    # [OLD] Pixel-level bias map with high-res background (commented out)
+    # produce_pixel_bias_map_hr_background(ds, pix_test, y_test, y_pred_test,
+    #     title="Pixel Bias: All Test Data")
+
+    # [NEW] Simple pixel-level bias map, no background
     pixel_idx_full = np.tile(np.arange(ds.dims["pixel"]), ds.dims["year"])
     pix_valid = pixel_idx_full[valid_mask]
     pix_test  = pix_valid[test_indices]
-    produce_pixel_bias_map_hr_background(ds, pix_test, y_test, y_pred_test,
-        title="Pixel Bias: All Test Data")
+    produce_pixel_bias_map_simple(ds, pix_test, y_test, y_pred_test,
+                                  title="Pixel Bias: Simple Grid (Test Data)")
 
     # Boxplot by elevation/veg for entire TEST set
     elev_2d = ds["Elevation"].values
@@ -549,19 +690,41 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
     plot_top5_feature_scatter(rf, X_test, y_test, cat_test,
                               feat_names, title_prefix="(NewApproach)")
 
+    # [NEW] Mean predicted / observed DoD maps
+    # We'll compute them for ALL valid data (train + test combined).
+    y_pred_all = rf.predict(X_valid)
+    n_pix = ds.dims["pixel"]
+    sum_pred = np.zeros(n_pix, dtype=float)
+    sum_obs  = np.zeros(n_pix, dtype=float)
+    count    = np.zeros(n_pix, dtype=float)
+
+    for px, obs_val, pred_val in zip(pix_valid, y_valid, y_pred_all):
+        sum_pred[px] += pred_val
+        sum_obs[px]  += obs_val
+        count[px]    += 1
+
+    mean_pred = np.full(n_pix, np.nan, dtype=float)
+    mean_obs  = np.full(n_pix, np.nan, dtype=float)
+    good_mask = (count > 0)
+    mean_pred[good_mask] = sum_pred[good_mask] / count[good_mask]
+    mean_obs[good_mask]  = sum_obs[good_mask]  / count[good_mask]
+
+    plot_mean_dod_map_simple(ds, mean_pred, title="Mean Predicted DoD (Simple Grid)")
+    plot_mean_dod_map_simple(ds, mean_obs,  title="Mean Observed DoD (Simple Grid)")
+
     return rf
 
 
 ############################################################
 # MAIN
 ############################################################
-if __name__=="__main__":
+if __name__ == "__main__":
     path_pat = "/Users/yashnilmohanty/Desktop/data/BurnArea_Data/Merged_BurnArea_{year:04d}{month:02d}.nc"
     pre_burn = compute_pre2004_burn(coords, path_pat, 2001, 2003)
 
     ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset3.nc")
     cumsum_2d = compute_burn_cumsum_with_initial(ds, pre_burn)
-    ds["burn_cumsum"] = (("year","pixel"), cumsum_2d)
+    ds["burn_cumsum"] = (("year", "pixel"), cumsum_2d)
     cat_2d = define_4cats_cumsum(cumsum_2d)
 
     X_all, y_all, feat_names, valid_mask = flatten_spatiotemporal(ds, target_var="DOD")

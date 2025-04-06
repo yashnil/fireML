@@ -12,7 +12,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 
 from scipy.stats import ranksums  # for Wilcoxon rank-sum tests
-import numpy.random as npr  # for random sampling in the final new step
+import numpy.random as npr  # for random subsampling in the final step
 
 ############################################################
 # 0) LOAD COORDINATES
@@ -25,7 +25,6 @@ from obtainCoordinates import coords  # shape(n_pixels,2)
 def compute_pre2004_burn(coords, path_pattern, year_start=2001, year_end=2003):
     """
     Summation from 2001..2003 for each pixel bounding box.
-    Exactly like in your original code.
     """
     import xarray as xr
     n_pixels = len(coords)
@@ -47,11 +46,15 @@ def compute_pre2004_burn(coords, path_pattern, year_start=2001, year_end=2003):
             flat_lat  = lat_2d.ravel()
             flat_lon  = lon_2d.ravel()
 
-            # Clamp fraction>1 =>1
+            # Clamp fraction>1 => 1
             flat_burn = np.minimum(flat_burn, 1.0)
 
             # Remove NaNs
-            valid_mask = np.isfinite(flat_burn) & np.isfinite(flat_lat) & np.isfinite(flat_lon)
+            valid_mask = (
+                np.isfinite(flat_burn) &
+                np.isfinite(flat_lat) &
+                np.isfinite(flat_lon)
+            )
             fb  = flat_burn[valid_mask]
             fla = flat_lat[valid_mask]
             flo = flat_lon[valid_mask]
@@ -60,8 +63,10 @@ def compute_pre2004_burn(coords, path_pattern, year_start=2001, year_end=2003):
             for i, (coord_lat, coord_lon) in enumerate(coords):
                 lat_min, lat_max = coord_lat - 0.005, coord_lat + 0.005
                 lon_min, lon_max = coord_lon - 0.005, coord_lon + 0.005
-                in_box = ((fla >= lat_min) & (fla <= lat_max) &
-                          (flo >= lon_min) & (flo <= lon_max))
+                in_box = (
+                    (fla >= lat_min) & (fla <= lat_max) &
+                    (flo >= lon_min) & (flo <= lon_max)
+                )
                 box_burn = fb[in_box]
                 mean_frac = np.mean(box_burn) if len(box_burn) > 0 else 0.0
                 pre_burn[i] += mean_frac
@@ -76,8 +81,8 @@ def compute_pre2004_burn(coords, path_pattern, year_start=2001, year_end=2003):
 ############################################################
 def compute_burn_cumsum_with_initial(ds, pre_burn):
     """
-    Add pre_burn to year=0, then cumsum across subsequent years.
-    Used only to define categories, not as a predictor.
+    Add pre_burn to year=0, then cumsum across subsequent years,
+    for defining categories only (not a predictor).
     """
     burn_2d = ds["burn_fraction"].values
     n_years, n_pixels = burn_2d.shape
@@ -91,28 +96,27 @@ def compute_burn_cumsum_with_initial(ds, pre_burn):
 
 ############################################################
 # 3) Gather features
-#    Exclude 'burn_fraction', 'burn_cumsum' from the predictors
+#    Exclude 'burn_fraction' and 'burn_cumsum'
 ############################################################
 def gather_spatiotemporal_features(ds, target_var="DOD"):
     """
-    This time, we exclude both 'burn_fraction' and 'burn_cumsum'
-    so they are NOT used as predictors.
+    Exclude 'burn_fraction' and 'burn_cumsum' from the predictor set.
     """
     exclude_vars = {
         target_var.lower(),
         'lat','lon','latitude','longitude',
         'pixel','year','ncoords_vector','nyears_vector',
-        'burn_fraction',     # exclude
-        'burn_cumsum'        # exclude
+        'burn_fraction',
+        'burn_cumsum'
     }
     all_feats = {}
     n_years = ds.dims['year']
 
     for var_name in ds.data_vars:
-        # if var_name.lower() in exclude_vars => skip
+        # skip if var_name.lower() in the exclude set
         if var_name.lower() in exclude_vars:
             continue
-        
+
         da = ds[var_name]
         dims = set(da.dims)
         if dims == {'year', 'pixel'}:
@@ -137,7 +141,7 @@ def flatten_spatiotemporal(ds, target_var="DOD"):
     X_all = np.column_stack(X_cols)
 
     dod_2d = ds[target_var].values
-    y_all = dod_2d.ravel(order='C')
+    y_all  = dod_2d.ravel(order='C')
 
     valid_mask = (
         ~np.isnan(X_all).any(axis=1) &
@@ -146,12 +150,9 @@ def flatten_spatiotemporal(ds, target_var="DOD"):
     return X_all, y_all, feat_names, valid_mask
 
 ############################################################
-# 4) define categories c0..c3 from cumsum_2d
+# 4) define c0..c3 from cumsum
 ############################################################
 def define_4cats_cumsum(cumsum_2d):
-    """
-    Same as before, only used to define categories, not as predictor data
-    """
     cat_2d = np.zeros(cumsum_2d.shape, dtype=int)
     c0 = cumsum_2d < 0.25
     c1 = (cumsum_2d >= 0.25) & (cumsum_2d < 0.5)
@@ -164,7 +165,7 @@ def define_4cats_cumsum(cumsum_2d):
     return cat_2d
 
 ############################################################
-# 5) Plotting (scatter/hist/cat) – same as before
+# 5) Plotting (scatter, hist, cat)
 ############################################################
 def plot_scatter(y_true, y_pred, title="Scatter"):
     plt.figure(figsize=(6,6))
@@ -188,8 +189,10 @@ def plot_bias_hist(y_true, y_pred, title="Bias Histogram", x_min=-100, x_max=100
     residuals = y_pred - y_true
     plt.figure(figsize=(6,4))
     plt.hist(residuals, bins=50, range=(x_min,x_max), alpha=0.7)
+
     mean_bias = np.mean(residuals)
     std_bias  = np.std(residuals)
+
     plt.axvline(mean_bias, color='k', linestyle='dashed', linewidth=2)
     plt.title(f"{title}\nMean={mean_bias:.2f}, Std={std_bias:.2f}")
     plt.xlabel("Bias (Pred - Obs)")
@@ -214,9 +217,11 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title="Scatter by Category"):
     mn = min(y_pred.min(), y_true.min())
     mx = max(y_pred.max(), y_true.max())
     plt.plot([mn,mx],[mn,mx],'k--', label='1:1 line')
+
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     bias = np.mean(y_pred - y_true)
     r2   = r2_score(y_true, y_pred)
+
     plt.title(f"{title}\nRMSE={rmse:.2f}, Bias={bias:.2f}, R²={r2:.3f}")
     plt.xlabel("Predicted DoD")
     plt.ylabel("Observed DoD")
@@ -225,8 +230,7 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title="Scatter by Category"):
     plt.show()
 
 ############################################################
-# 6) Additional Visualization
-#    (pixel-level bias map, boxplot) – same as before
+# 6) Additional Visualization: pixel-level bias map, boxplot
 ############################################################
 def produce_pixel_bias_map_hr_background(ds, pixel_idx, y_true, y_pred,
         lat_var="latitude", lon_var="longitude",
@@ -336,7 +340,7 @@ def plot_top10_features(rf_model, feat_names, title="Top 10 Feature Importances"
 def plot_top5_feature_scatter(rf_model, X_valid, y_valid, cat_valid, feat_names,
                               title_prefix="(NoBurnFrac)"):
     """
-    Just as before, but the prefix clarifies that we excluded burn_fraction
+    Show top-5 features, scatter vs. Observed DOD, color-coded by category
     """
     importances = rf_model.feature_importances_
     idx_sorted = np.argsort(importances)[::-1]
@@ -374,12 +378,13 @@ def plot_top5_feature_scatter(rf_model, X_valid, y_valid, cat_valid, feat_names,
         plt.show()
 
 ############################################################
-# 8) Random forest experiment
+# 8) Random Forest Experiment (NoBurnFrac)
 #    70/30 split per category
-#    No burn_fraction, no burn_cumsum as features
+#    Add rank-sum tests, downsampling, saving .txt data
 ############################################################
 def run_rf_excluding_burnfraction(X_all, y_all, cat_2d, valid_mask, ds, feat_names):
     from sklearn.model_selection import train_test_split
+    from scipy.stats import ranksums
 
     cat_flat_all = cat_2d.ravel(order='C')
     cat_valid    = cat_flat_all[valid_mask]
@@ -423,30 +428,114 @@ def run_rf_excluding_burnfraction(X_all, y_all, cat_2d, valid_mask, ds, feat_nam
     # Evaluate on TRAIN
     y_pred_train = rf.predict(X_train)
     plot_scatter(y_train, y_pred_train, title="RF (NoBurnFrac): Train (70% each cat)")
-    plot_bias_hist(y_train, y_pred_train, title="RF Bias Hist (NoBurnFrac): Train")
+    plot_bias_hist(y_train, y_pred_train, title="RF (NoBurnFrac): Bias Hist (Train)")
 
     # Evaluate on TEST (all cats combined)
     y_pred_test = rf.predict(X_test)
     plot_scatter(y_test, y_pred_test, title="RF (NoBurnFrac): Test (30% each cat)")
-    plot_bias_hist(y_test, y_pred_test, title="RF Bias Hist (NoBurnFrac): Test (all cats)")
+    plot_bias_hist(y_test, y_pred_test, title="RF (NoBurnFrac): Bias Hist (Test)")
 
-    # Evaluate per category – observe c1..c3 performance
+    # --------------------------
+    # Wilcoxon rank-sum => c1..c3 vs c0
+    # --------------------------
     cat_test = cat_valid[test_indices]
+    biases_dict = {}
+    for cval in [0,1,2,3]:
+        mask_c = (cat_test == cval)
+        if np.any(mask_c):
+            y_c     = y_test[mask_c]
+            y_predc = y_pred_test[mask_c]
+            bias_c  = y_predc - y_c
+            biases_dict[cval] = bias_c
+
+    # rank-sum c1..c3 vs c0
+    if 0 in biases_dict:
+        for cval in [1,2,3]:
+            if cval in biases_dict:
+                b0 = biases_dict[0]
+                bc = biases_dict[cval]
+                stat, pval = ranksums(b0, bc)
+                print(f"[NoBurnFrac] Wilcoxon rank-sum c{cval} vs c0: stat={stat:.3f}, p={pval:.3g}")
+            else:
+                print(f"[NoBurnFrac] No test data for cat={cval}, skipping rank-sum vs c0.")
+
+    # --------------------------
+    # Downsampling approach
+    # --------------------------
+    test_counts = {}
+    for cval in [0,1,2,3]:
+        mask_c = (cat_test == cval)
+        n_c = np.sum(mask_c)
+        if n_c > 0:
+            test_counts[cval] = n_c
+
+    if not test_counts:
+        print("[NoBurnFrac] No test data => no downsampling test.")
+    else:
+        minCat   = min(test_counts, key=test_counts.get)
+        minCount = test_counts[minCat]
+        print(f"[NoBurnFrac] Category with fewest test samples = c{minCat}, count={minCount}")
+
+        n_runs = 10
+        for cval in test_counts:
+            c_mask = (cat_test == cval)
+            idx_c  = np.where(c_mask)[0]
+            if len(idx_c) < minCount:
+                print(f"[NoBurnFrac] cat={cval} has <{minCount} => skip sampling.")
+                continue
+
+            biases_list = []
+            rmse_list   = []
+            for _ in range(n_runs):
+                sub_idx = npr.choice(idx_c, size=minCount, replace=False)
+                y_sub   = y_test[sub_idx]
+                yp_sub  = y_pred_test[sub_idx]
+                bias_sub= yp_sub - y_sub
+                mean_bias = np.mean(bias_sub)
+                mean_rmse = np.sqrt(mean_squared_error(y_sub, yp_sub))
+                biases_list.append(mean_bias)
+                rmse_list.append(mean_rmse)
+
+            avg_bias = np.mean(biases_list)
+            avg_rmse = np.mean(rmse_list)
+            print(f"[NoBurnFrac] cat={cval}, {n_runs} runs of size={minCount},"
+                  f" mean bias={avg_bias:.3f}, mean RMSE={avg_rmse:.3f}")
+
+    # --------------------------
+    # Save predicted + observed DoD => .txt
+    # --------------------------
     for cval in [0,1,2,3]:
         test_sel = (cat_test == cval)
         if not np.any(test_sel):
-            print(f"No test samples cat={cval} => skip cat-level plots.")
+            print(f"[NoBurnFrac] cat={cval} => no test => skip .txt save.")
+            continue
+
+        y_c = y_test[test_sel]
+        y_pred_c = y_pred_test[test_sel]
+
+        obs_outfile  = f"/Users/yashnilmohanty/Desktop/obs_DOD_cat{cval}_NoBurnFrac.txt"
+        pred_outfile = f"/Users/yashnilmohanty/Desktop/pred_DOD_cat{cval}_NoBurnFrac.txt"
+        np.savetxt(obs_outfile,  y_c,      fmt="%.6f")
+        np.savetxt(pred_outfile, y_pred_c, fmt="%.6f")
+
+        print(f"[NoBurnFrac] Saved cat={cval} => {obs_outfile}, {pred_outfile}")
+
+    # Evaluate on each cat=0..3 in the test set
+    for cval in [0,1,2,3]:
+        test_sel = (cat_test == cval)
+        if not np.any(test_sel):
+            print(f"[NoBurnFrac] No test samples cat={cval} => skip cat-level plots.")
             continue
         X_c = X_test[test_sel]
         y_c = y_test[test_sel]
         y_pred_c = rf.predict(X_c)
 
-        plot_scatter(y_c, y_pred_c, title=f"RF (NoBurnFrac): Test, cat={cval}")
+        plot_scatter(y_c, y_pred_c, title=f"RF (NoBurnFrac): Test cat={cval}")
         plot_bias_hist(y_c, y_pred_c, title=f"RF (NoBurnFrac) Bias Hist: Test cat={cval}")
 
-    # Also do color-coded scatter for ALL test data
+    # Color-coded scatter for ALL test data
     plot_scatter_by_cat(y_test, y_pred_test, cat_test,
-                        title="RF (NoBurnFrac): All Test Data, color by cat")
+        title="RF (NoBurnFrac): All Test Data by Cat")
 
     # Pixel-level bias map
     pixel_idx_full = np.tile(np.arange(ds.dims["pixel"]), ds.dims["year"])
@@ -455,7 +544,7 @@ def run_rf_excluding_burnfraction(X_all, y_all, cat_2d, valid_mask, ds, feat_nam
     produce_pixel_bias_map_hr_background(ds, pix_test, y_test, y_pred_test,
         title="Pixel Bias: All Test Data (NoBurnFrac)")
 
-    # Boxplot by elevation/veg for entire TEST set
+    # Boxplot by elev/veg => entire TEST
     elev_2d = ds["Elevation"].values
     veg_2d  = ds["VegTyp"].values
     elev_valid = elev_2d.ravel(order='C')[valid_mask]
@@ -463,13 +552,12 @@ def run_rf_excluding_burnfraction(X_all, y_all, cat_2d, valid_mask, ds, feat_nam
     elev_test  = elev_valid[test_indices]
     veg_test   = veg_valid[test_indices]
     plot_boxplot_dod_by_elev_veg(y_test, elev_test, veg_test,
-                                 cat_label="AllTest (NoBurnFrac)")
+        cat_label="AllTest (NoBurnFrac)")
 
     # Feature importance
-    plot_top10_features(rf, feat_names,
-        title="RF (NoBurnFrac) Top 10 Feature Importances")
-    plot_top5_feature_scatter(rf, X_test, y_test, cat_test,
-                              feat_names, title_prefix="(NoBurnFrac)")
+    plot_top10_features(rf, feat_names, title="RF (NoBurnFrac) Top 10 Importances")
+    plot_top5_feature_scatter(rf, X_test, y_test, cat_test, feat_names,
+        title_prefix="(NoBurnFrac)")
 
     return rf
 
@@ -491,7 +579,7 @@ if __name__=="__main__":
     X_all, y_all, feat_names, valid_mask = flatten_spatiotemporal(ds, target_var="DOD")
     print("Feature names (No BurnFrac):", feat_names)
 
-    # 4) run experiment (NoBurnFrac)
+    # 4) run experiment => includes rank-sum, downsampling, saving .txt
     rf_model_noFrac = run_rf_excluding_burnfraction(
         X_all, y_all, cat_2d, valid_mask, ds, feat_names
     )

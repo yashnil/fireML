@@ -12,11 +12,12 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
 
 from scipy.stats import ranksums  # for Wilcoxon rank-sum tests
+import numpy.random as npr  # for random sampling in the final new step
 
 ############################################################
 # 0) LOAD COORDINATES
 ############################################################
-from obtainCoordinates import coords  # shape(n_pixels,2)
+from obtainCoordinates import coords  # shape(n_pixels, 2)
 
 ############################################################
 # 1) Pre-2004 Burn
@@ -30,22 +31,22 @@ def compute_pre2004_burn(coords, path_pattern, year_start=2001, year_end=2003):
     pre_burn = np.zeros((n_pixels,), dtype=np.float32)
 
     years = range(year_start, year_end + 1)
-    months= range(1, 13)
+    months = range(1, 13)
 
     for yr in years:
         for mm in months:
             file_path = path_pattern.format(year=yr, month=mm)
             ds_nc = xr.open_dataset(file_path)
-            burn_2d = ds_nc["MTBS_BurnFraction"].values  # (ny, nx)
-            lat_2d  = ds_nc["XLAT_M"].values
-            lon_2d  = ds_nc["XLONG_M"].values
+            burn_2d = ds_nc["MTBS_BurnFraction"].values
+            lat_2d = ds_nc["XLAT_M"].values
+            lon_2d = ds_nc["XLONG_M"].values
 
             # Flatten
             flat_burn = burn_2d.ravel()
             flat_lat  = lat_2d.ravel()
             flat_lon  = lon_2d.ravel()
 
-            # Clamp fraction>1 =>1
+            # Clamp fraction > 1 => 1
             flat_burn = np.minimum(flat_burn, 1.0)
 
             # Remove NaNs
@@ -58,14 +59,15 @@ def compute_pre2004_burn(coords, path_pattern, year_start=2001, year_end=2003):
             for i, (coord_lat, coord_lon) in enumerate(coords):
                 lat_min, lat_max = coord_lat - 0.005, coord_lat + 0.005
                 lon_min, lon_max = coord_lon - 0.005, coord_lon + 0.005
-                in_box = (fla >= lat_min) & (fla <= lat_max) & (flo >= lon_min) & (flo <= lon_max)
+                in_box = ((fla >= lat_min) & (fla <= lat_max) &
+                          (flo >= lon_min) & (flo <= lon_max))
                 box_burn = fb[in_box]
                 mean_frac = np.mean(box_burn) if len(box_burn) > 0 else 0.0
                 pre_burn[i] += mean_frac
 
             ds_nc.close()
 
-    # Final clamp => <= 1.0 if desired
+    # final clamp => <= 1.0
     pre_burn = np.minimum(pre_burn, 1.0)
     return pre_burn
 
@@ -74,16 +76,14 @@ def compute_pre2004_burn(coords, path_pattern, year_start=2001, year_end=2003):
 ############################################################
 def compute_burn_cumsum_with_initial(ds, pre_burn):
     """
-    ds["burn_fraction"] => shape (year=15, pixel=...).
-    We add pre_burn to year=0, and then do cumsum across years.
+    ds["burn_fraction"] => shape (year=15, pixel).
+    Add pre_burn to year=0, then cumsum across years.
     """
-    burn_2d = ds["burn_fraction"].values  # shape(15, pixel)
+    burn_2d = ds["burn_fraction"].values
     n_years, n_pixels = burn_2d.shape
     cumsum_2d = np.zeros((n_years, n_pixels), dtype=np.float32)
 
-    # year=0 => 2004
     cumsum_2d[0, :] = pre_burn + burn_2d[0, :]
-
     for y in range(1, n_years):
         cumsum_2d[y, :] = cumsum_2d[y - 1, :] + burn_2d[y, :]
 
@@ -95,12 +95,12 @@ def compute_burn_cumsum_with_initial(ds, pre_burn):
 def gather_spatiotemporal_features(ds, target_var="DOD"):
     """
     Collect all data_vars except the target, lat/lon placeholders, etc.
-    We DO NOT exclude 'burn_fraction' => used as predictor!
+    We keep 'burn_fraction' as a predictor.
     """
     exclude_vars = {
         target_var.lower(),
-        'lat','lon','latitude','longitude',
-        'pixel','year','ncoords_vector','nyears_vector'
+        'lat', 'lon', 'latitude', 'longitude',
+        'pixel', 'year', 'ncoords_vector', 'nyears_vector'
     }
     all_feats = {}
     n_years = ds.dims['year']
@@ -111,41 +111,32 @@ def gather_spatiotemporal_features(ds, target_var="DOD"):
         
         da = ds[var_name]
         dims = set(da.dims)
+        # If it's (year, pixel), keep as is
         if dims == {'year', 'pixel'}:
-            arr2d = da.values  # shape (year, pixel)
+            arr2d = da.values
             all_feats[var_name] = arr2d
+        # If it's (pixel), replicate across all years
         elif dims == {'pixel'}:
-            # replicate across years
             arr1d = da.values
-            arr2d = np.tile(arr1d, (n_years,1))  # shape (year, pixel)
+            arr2d = np.tile(arr1d, (n_years,1))
             all_feats[var_name] = arr2d
 
     return all_feats
 
 def flatten_spatiotemporal(ds, target_var="DOD"):
-    """
-    Return:
-      X_all => shape(N, n_features)
-      y_all => shape(N,)
-      feat_names => list of feature names
-      valid_mask => boolean shape(N,) for rows with no NaN
-    """
     feat_dict = gather_spatiotemporal_features(ds, target_var=target_var)
-    feat_names = sorted(feat_dict.keys())  # sorted list
+    feat_names = sorted(feat_dict.keys())
 
-    # Stack columns
     X_cols = []
     for fname in feat_names:
-        arr2d = feat_dict[fname]  # (year, pixel)
-        arr1d = arr2d.ravel(order='C')  # flatten
+        arr2d = feat_dict[fname]
+        arr1d = arr2d.ravel(order='C')
         X_cols.append(arr1d)
     X_all = np.column_stack(X_cols)
 
-    # Flatten target
-    dod_2d = ds[target_var].values  # shape (year, pixel)
+    dod_2d = ds[target_var].values
     y_all = dod_2d.ravel(order='C')
 
-    # Valid mask => no NaN in any feature, no NaN in y
     valid_mask = (
         ~np.isnan(X_all).any(axis=1) &
         ~np.isnan(y_all)
@@ -205,12 +196,7 @@ def plot_bias_hist(y_true, y_pred, title="Bias Histogram", x_min=-100, x_max=100
     plt.show()
 
 def plot_scatter_by_cat(y_true, y_pred, cat, title="Scatter by Category"):
-    """
-    Color‐code each sample by its category (0..3).
-    Adds a 1:1 line + legend, and shows stats (RMSE, bias, R²).
-    """
     plt.figure(figsize=(6,6))
-    
     cat_colors = {0:'red', 1:'green', 2:'blue', 3:'orange'}
 
     for cval in cat_colors.keys():
@@ -240,13 +226,20 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title="Scatter by Category"):
     plt.show()
 
 ############################################################
-# 6) Additional Visualization: Pixel-level bias map, boxplot
+# 6) Additional Visualization
+#    (A) Original pixel-level bias map w/ high-res background
+#    (B) Boxplot by elev/veg
+#    (C) [NEW] Simple "grid" pixel-level bias map
+#    (D) [NEW] Mean predicted/observed DoD maps
 ############################################################
 def produce_pixel_bias_map_hr_background(ds, pixel_idx, y_true, y_pred,
         lat_var="latitude", lon_var="longitude",
         title="Pixel Bias: High-Res Background"):
+    """
+    Original function that uses Cartopy (Stamen terrain tiles) for a high-res background.
+    We'll keep this here for completeness, but we won't call it if we prefer a simpler approach.
+    """
     from matplotlib.colors import TwoSlopeNorm
-
     tiler = cimgt.Stamen('terrain')
     n_pixels = ds.dims["pixel"]
     sum_bias = np.zeros(n_pixels, dtype=float)
@@ -264,6 +257,7 @@ def produce_pixel_bias_map_hr_background(ds, pixel_idx, y_true, y_pred,
     lat_full = ds[lat_var].values
     lon_full = ds[lon_var].values
 
+    # Flatten lat/lon if stored as 2D
     if lat_full.ndim == 2:
         lat_1d_all = lat_full[0, :]
         lon_1d_all = lon_full[0, :]
@@ -275,6 +269,7 @@ def produce_pixel_bias_map_hr_background(ds, pixel_idx, y_true, y_pred,
     if np.isnan(max_abs):
         max_abs = 1.0
 
+    from matplotlib.colors import TwoSlopeNorm
     norm = TwoSlopeNorm(vmin=-max_abs, vcenter=0, vmax=max_abs)
 
     fig = plt.figure(figsize=(9,7))
@@ -285,13 +280,12 @@ def produce_pixel_bias_map_hr_background(ds, pixel_idx, y_true, y_pred,
     ax.add_feature(cfeature.BORDERS, linewidth=0.5, alpha=0.5)
     ax.add_feature(cfeature.STATES, linewidth=0.5, alpha=0.5)
 
-    # Plot all pixels in light gray
+    # Plot pixels with no data in light gray
     ax.scatter(
         lon_1d_all, lat_1d_all,
         transform=ccrs.PlateCarree(),
         c="lightgray", s=3, alpha=0.7, label="Unused"
     )
-    # Overplot used
     sc = ax.scatter(
         lon_1d_all[mask],
         lat_1d_all[mask],
@@ -333,12 +327,91 @@ def plot_boxplot_dod_by_elev_veg(y_dod, elev, vegtyp, cat_label="c0"):
     plt.tight_layout()
     plt.show()
 
+# (C) [NEW] Simple grid-based bias map (no Cartopy)
+def produce_pixel_bias_map_simple(ds, pixel_idx, y_true, y_pred,
+                                  lat_var="latitude", lon_var="longitude",
+                                  title="Pixel Bias: Simple Grid"):
+    """
+    A simpler pixel-level bias map that just does a scatter of (lon, lat) 
+    colored by mean bias. Does NOT use Cartopy or any background tiles.
+    """
+    from matplotlib.colors import TwoSlopeNorm
+
+    n_pixels = ds.dims["pixel"]
+    sum_bias = np.zeros(n_pixels, dtype=float)
+    count = np.zeros(n_pixels, dtype=float)
+
+    # Accumulate bias per pixel
+    residuals = y_pred - y_true
+    for i, px in enumerate(pixel_idx):
+        sum_bias[px] += residuals[i]
+        count[px] += 1
+    mean_bias = np.full(n_pixels, np.nan, dtype=float)
+    good = (count > 0)
+    mean_bias[good] = sum_bias[good] / count[good]
+
+    # Extract lat/lon as 1D
+    lat_full = ds[lat_var].values
+    lon_full = ds[lon_var].values
+    if lat_full.ndim == 2:
+        lat_1d = lat_full[0, :]
+        lon_1d = lon_full[0, :]
+    else:
+        lat_1d = lat_full
+        lon_1d = lon_full
+
+    # Figure out color scaling
+    vmax = np.nanmax(np.abs(mean_bias)) or 1.0
+    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
+
+    plt.figure(figsize=(7,6))
+    # All points in light gray
+    plt.scatter(lon_1d, lat_1d, c="lightgray", s=5, alpha=0.7, label="No Data")
+    # Points with actual data in bwr
+    sc = plt.scatter(lon_1d[good], lat_1d[good],
+                     c=mean_bias[good], cmap="bwr", norm=norm,
+                     s=10, alpha=0.9, label="Bias")
+
+    plt.colorbar(sc, shrink=0.8, label="Mean Bias (Pred - Obs)")
+    plt.xlabel("Longitude")
+    plt.ylabel("Latitude")
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+# (D) [NEW] Plot mean predicted or observed DoD
+def plot_mean_dod_map_simple(ds, mean_vals,
+                             lat_var="latitude", lon_var="longitude",
+                             title="Mean DoD"):
+    """
+    Simple scatter map of per-pixel mean DoD (predicted or observed),
+    again not using Cartopy.
+    """
+    lat_full = ds[lat_var].values
+    lon_full = ds[lon_var].values
+    if lat_full.ndim == 2:
+        lat_1d = lat_full[0, :]
+        lon_1d = lon_full[0, :]
+    else:
+        lat_1d = lat_full
+        lon_1d = lon_full
+
+    plt.figure(figsize=(7,6))
+    sc = plt.scatter(lon_1d, lat_1d, c=mean_vals, cmap="viridis", s=10, alpha=0.9)
+    plt.colorbar(sc, shrink=0.8, label="Mean DoD (days)")
+    plt.xlabel("Longitude")
+    plt.ylabel("Latitude")
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
 ############################################################
 # 7) Feature Importance Plot (Random Forest)
 ############################################################
 def plot_top10_features(rf_model, feat_names, title="Top 10 Feature Importances"):
     importances = rf_model.feature_importances_
-    idx_sorted = np.argsort(importances)[::-1]  # descending
+    idx_sorted = np.argsort(importances)[::-1]
     top10_idx  = idx_sorted[:10]
     top10_vals = importances[top10_idx]
     top10_names= [feat_names[i] for i in top10_idx]
@@ -389,16 +462,13 @@ def plot_top5_feature_scatter(rf_model, X_valid, y_valid, cat_valid, feat_names,
         plt.show()
 
 ############################################################
-# 8) The NEW random forest experiment:
-#    70% train from each category c0..c3, 30% test
+# 8) The NEW random forest experiment
 #    + Wilcoxon rank-sum test
-#    + [NEW] Additional test using the category with fewest samples
+#    + Additional test using the category with fewest samples
+#    + Save predicted/observed DoD arrays to .txt
+#    + Now we add simpler spatial maps for bias + mean predicted/observed
 ############################################################
 def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_names):
-    from sklearn.model_selection import train_test_split
-    from scipy.stats import ranksums  # for Wilcoxon rank-sum test
-    import numpy.random as npr  # for random sampling in the final new step
-
     cat_flat_all = cat_2d.ravel(order='C')  
     cat_valid    = cat_flat_all[valid_mask] 
 
@@ -410,10 +480,10 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
 
     valid_idxs = np.where(valid_mask)[0]
 
-    # Build train/test subsets category by category
+    # 70/30 splitting for each category => train/test
     for cval in [0,1,2,3]:
         cat_mask = (cat_valid == cval)
-        cat_rows = np.where(cat_mask)[0]  
+        cat_rows = np.where(cat_mask)[0]
         if len(cat_rows) == 0:
             print(f"Category {cval} has no valid data. Skipping.")
             continue
@@ -434,7 +504,7 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
     X_test  = X_valid[test_indices]
     y_test  = y_valid[test_indices]
 
-    # Train random forest
+    # Train the forest
     rf = RandomForestRegressor(n_estimators=100, random_state=42)
     rf.fit(X_train, y_train)
 
@@ -443,14 +513,12 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
     plot_scatter(y_train, y_pred_train, title="RF: Train (70% each cat)")
     plot_bias_hist(y_train, y_pred_train, title="RF Bias Hist: Train")
 
-    # Evaluate on TEST (all categories combined)
+    # Evaluate on TEST (all cats combined)
     y_pred_test = rf.predict(X_test)
     plot_scatter(y_test, y_pred_test, title="RF: Test (30% each cat)")
     plot_bias_hist(y_test, y_pred_test, title="RF Bias Hist: Test (all cats)")
 
-    # -------------------------------------------------------
-    # A) Wilcoxon rank-sum test of biases => c1..c3 vs c0
-    # -------------------------------------------------------
+    # Wilcoxon rank-sum => c1..c3 vs c0
     cat_test = cat_valid[test_indices]
     biases_dict = {}
     for cval in [0,1,2,3]:
@@ -472,9 +540,8 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
                 print(f"No test data for cat={cval}, skipping rank-sum vs c0.")
 
     # -----------------------------------------------
-    # [NEW] 2) Additional “downsampling” test
+    # Additional "downsampling" test
     # -----------------------------------------------
-    # Find how many test samples each category has
     test_counts = {}
     for cval in [0,1,2,3]:
         mask_c = (cat_test == cval)
@@ -483,35 +550,24 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
             test_counts[cval] = n_c
 
     if not test_counts:
-        print("[NEW] No test data for any category => cannot do downsampling test.")
+        print("No test data => cannot do downsampling test.")
     else:
-        # find category with min # of test samples
         minCat   = min(test_counts, key=test_counts.get)
         minCount = test_counts[minCat]
-        print(f"[NEW] The category with fewest test samples is c{minCat}, count={minCount}")
+        print(f"The category with fewest test samples is c{minCat}, count={minCount}")
 
-        # for each category cval, do 10 random subsets of size minCount
-        # compute mean bias & rmse for each subset, then average
         n_runs = 10
         for cval in test_counts:
             c_mask = (cat_test == cval)
-            idx_c  = np.where(c_mask)[0]  # indexes within test_indices
-            biases_list = []
-            rmse_list   = []
-
-            # gather the subset arrays
-            y_c_full  = y_test[idx_c]
-            yp_c_full = y_pred_test[idx_c]
-
-            # if cval has fewer than minCount, we skip or handle carefully
-            # but by definition, cval >= minCount if cval != minCat => not necessarily; if cval == minCat we do exact
-            # We'll do "if len(idx_c) < minCount => skip"
+            idx_c  = np.where(c_mask)[0]
             if len(idx_c) < minCount:
-                print(f"[NEW] Category {cval} has <{minCount} points => cannot sample => skipping.")
+                print(f"Category {cval} has <{minCount} points => skip sampling.")
                 continue
 
+            biases_list = []
+            rmse_list   = []
             for _ in range(n_runs):
-                sub_idx = npr.choice(idx_c, size=minCount, replace=False)
+                sub_idx = np.random.choice(idx_c, size=minCount, replace=False)
                 y_sub   = y_test[sub_idx]
                 yp_sub  = y_pred_test[sub_idx]
                 bias_sub= yp_sub - y_sub
@@ -520,17 +576,39 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
                 biases_list.append(mean_bias)
                 rmse_list.append(mean_rmse)
 
-            # average across the 10 runs
             avg_bias = np.mean(biases_list)
             avg_rmse = np.mean(rmse_list)
-            print(f"[NEW] Category c{cval}: from 10 random subsamples of size={minCount},"
-                  f" mean bias={avg_bias:.3f}, mean RMSE={avg_rmse:.3f}")
+            print(f"Category c{cval}: from 10 random subsamples (size={minCount}), "
+                  f"mean bias={avg_bias:.3f}, mean RMSE={avg_rmse:.3f}")
+
+    # -----------------------------------------------
+    # Save predicted + observed DoD to .txt
+    # -----------------------------------------------
+    # We'll do this per-category in the TEST set
+    for cval in [0,1,2,3]:
+        test_sel = (cat_test == cval)
+        if not np.any(test_sel):
+            print(f"[TXT] No test samples cat={cval}, skipping .txt save.")
+            continue
+
+        # Observed vs. predicted for that category
+        y_c = y_test[test_sel]
+        y_pred_c = y_pred_test[test_sel]
+
+        # Save to your desktop, one value per line
+        obs_outfile  = f"/Users/yashnilmohanty/Desktop/obs_DOD_cat{cval}.txt"
+        pred_outfile = f"/Users/yashnilmohanty/Desktop/pred_DOD_cat{cval}.txt"
+
+        np.savetxt(obs_outfile,  y_c,      fmt="%.6f")
+        np.savetxt(pred_outfile, y_pred_c, fmt="%.6f")
+
+        print(f"[TXT] Saved cat={cval} => {obs_outfile}, {pred_outfile}")
 
     # Evaluate on each cat=0..3 in the test set
     for cval in [0,1,2,3]:
         test_sel = (cat_test == cval)
         if not np.any(test_sel):
-            print(f"No test samples cat={cval} in final test set => skip cat-level plots.")
+            print(f"No test samples cat={cval} => skip cat-level plots.")
             continue
         X_c = X_test[test_sel]
         y_c = y_test[test_sel]
@@ -543,12 +621,16 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
     plot_scatter_by_cat(y_test, y_pred_test, cat_test,
                         title="RF: All Test Data, color by cat")
 
-    # Pixel-level bias map
+    # [OLD] Pixel-level bias map with high-res background (commented out)
+    # produce_pixel_bias_map_hr_background(ds, pix_test, y_test, y_pred_test,
+    #     title="Pixel Bias: All Test Data")
+
+    # [NEW] Simple pixel-level bias map, no background
     pixel_idx_full = np.tile(np.arange(ds.dims["pixel"]), ds.dims["year"])
     pix_valid = pixel_idx_full[valid_mask]
     pix_test  = pix_valid[test_indices]
-    produce_pixel_bias_map_hr_background(ds, pix_test, y_test, y_pred_test,
-        title="Pixel Bias: All Test Data")
+    produce_pixel_bias_map_simple(ds, pix_test, y_test, y_pred_test,
+                                  title="Pixel Bias: Simple Grid (Test Data)")
 
     # Boxplot by elevation/veg for entire TEST set
     elev_2d = ds["Elevation"].values
@@ -564,34 +646,47 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
     plot_top5_feature_scatter(rf, X_test, y_test, cat_test,
                               feat_names, title_prefix="(NewApproach)")
 
+    # [NEW] Mean predicted / observed DoD maps
+    # We'll compute them for ALL valid data (train + test combined).
+    y_pred_all = rf.predict(X_valid)
+    n_pix = ds.dims["pixel"]
+    sum_pred = np.zeros(n_pix, dtype=float)
+    sum_obs  = np.zeros(n_pix, dtype=float)
+    count    = np.zeros(n_pix, dtype=float)
+
+    for px, obs_val, pred_val in zip(pix_valid, y_valid, y_pred_all):
+        sum_pred[px] += pred_val
+        sum_obs[px]  += obs_val
+        count[px]    += 1
+
+    mean_pred = np.full(n_pix, np.nan, dtype=float)
+    mean_obs  = np.full(n_pix, np.nan, dtype=float)
+    good_mask = (count > 0)
+    mean_pred[good_mask] = sum_pred[good_mask] / count[good_mask]
+    mean_obs[good_mask]  = sum_obs[good_mask]  / count[good_mask]
+
+    plot_mean_dod_map_simple(ds, mean_pred, title="Mean Predicted DoD (Simple Grid)")
+    plot_mean_dod_map_simple(ds, mean_obs,  title="Mean Observed DoD (Simple Grid)")
+
     return rf
 
 
 ############################################################
 # MAIN
 ############################################################
-if __name__=="__main__":
-
-    # 1) Load & compute pre-burn
+if __name__ == "__main__":
     path_pat = "/Users/yashnilmohanty/Desktop/data/BurnArea_Data/Merged_BurnArea_{year:04d}{month:02d}.nc"
     pre_burn = compute_pre2004_burn(coords, path_pat, 2001, 2003)
 
-    # 2) Load final dataset => final_dataset3.nc
     ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset3.nc")
-
-    # 3) cumsum => define categories
     cumsum_2d = compute_burn_cumsum_with_initial(ds, pre_burn)
-    ds["burn_cumsum"] = (("year","pixel"), cumsum_2d)
-    cat_2d = define_4cats_cumsum(cumsum_2d)  # shape(15, #pixels)
+    ds["burn_cumsum"] = (("year", "pixel"), cumsum_2d)
+    cat_2d = define_4cats_cumsum(cumsum_2d)
 
-    # 4) Flatten => now including burn_fraction as a predictor
     X_all, y_all, feat_names, valid_mask = flatten_spatiotemporal(ds, target_var="DOD")
-
     print("Feature names:", feat_names)
 
-    # 5) Train/test with the new approach:
     rf_model = run_rf_incl_burn_categorized(
         X_all, y_all, cat_2d, valid_mask, ds, feat_names
     )
-
     print("DONE.")

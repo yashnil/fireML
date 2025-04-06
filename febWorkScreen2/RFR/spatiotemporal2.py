@@ -3,8 +3,10 @@ import xarray as xr
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.stats import ranksums
 
 import matplotlib.colors as mcolors  # for TwoSlopeNorm
+from matplotlib.colors import TwoSlopeNorm
 
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
@@ -284,83 +286,43 @@ def plot_bias_hist(y_true, y_pred, title="Bias Histogram", x_min=-100, x_max=100
 ########################
 # High-Res Satellite Map
 ########################
-def produce_pixel_bias_map_hr_background(
-        ds, pixel_idx, y_true, y_pred,
-        lat_var="latitude", lon_var="longitude",
-        title="Pixel Bias: High-Res Background"
-    ):
+def produce_pixel_bias_map_simple(ds, pixel_idx, y_true, y_pred,
+                                  lat_var="latitude", lon_var="longitude",
+                                  title="Pixel Bias: Simple Grid"):
     """
-    Overlays the gridpoints onto a high-res Stamen Terrain map.
-    (Requires internet at runtime.)
+    Scatter of (lon, lat) coloured by mean bias (Pred‑Obs) per pixel.
+    No background tiles.  Handles the edge‑case where all biases are zero.
     """
-    from matplotlib.colors import TwoSlopeNorm
+    n_pix = ds.dims["pixel"]
+    sum_b, cnt = np.zeros(n_pix), np.zeros(n_pix)
 
-    # 1) Prepare tile source
-    tiler = cimgt.Stamen('terrain')
+    for px, res in zip(pixel_idx, y_pred - y_true):
+        sum_b[px] += res
+        cnt[px]   += 1
 
-    n_pixels = ds.dims["pixel"]
-    sum_bias = np.zeros(n_pixels, dtype=float)
-    count    = np.zeros(n_pixels, dtype=float)
+    mean_b = np.full(n_pix, np.nan)
+    mask   = cnt > 0
+    mean_b[mask] = sum_b[mask] / cnt[mask]
 
-    # 2) Compute mean bias for each pixel
-    residuals = y_pred - y_true
-    for i, px in enumerate(pixel_idx):
-        sum_bias[px] += residuals[i]
-        count[px]    += 1
+    # 1‑D coordinates
+    lat = ds[lat_var].values
+    lon = ds[lon_var].values
+    lat1d = lat[0] if lat.ndim == 2 else lat
+    lon1d = lon[0] if lon.ndim == 2 else lon
 
-    mean_bias = np.full(n_pixels, np.nan, dtype=float)
-    mask = (count > 0)
-    mean_bias[mask] = sum_bias[mask] / count[mask]
+    # colour scaling – ensure vmax > 0 to satisfy TwoSlopeNorm
+    vmax = np.nanmax(np.abs(mean_b))
+    if not np.isfinite(vmax) or vmax == 0:
+        vmax = 1e-6                          # tiny positive number
+    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
 
-    # 3) Get lat/lon arrays
-    lat_full = ds["latitude"].values
-    lon_full = ds["longitude"].values
-
-    if lat_full.ndim == 2:
-        lat_1d_all = lat_full[0, :]
-        lon_1d_all = lon_full[0, :]
-    else:
-        lat_1d_all = lat_full
-        lon_1d_all = lon_full
-
-    # 4) Range for color scale
-    max_abs = np.nanmax(np.abs(mean_bias))
-    if np.isnan(max_abs):
-        max_abs = 1.0
-
-    norm = TwoSlopeNorm(vmin=-max_abs, vcenter=0, vmax=max_abs)
-
-    # 5) Set up figure with Web Mercator from the tile
-    fig = plt.figure(figsize=(9,7))
-    ax = plt.axes(projection=tiler.crs)
-
-    ax.set_extent([-125, -113, 32, 42], crs=ccrs.PlateCarree())
-    ax.add_image(tiler, 8)
-    ax.add_feature(cfeature.BORDERS, linewidth=0.5, alpha=0.5)
-    ax.add_feature(cfeature.STATES, linewidth=0.5, alpha=0.5)
-
-    # 6) Plot all pixels in light gray
-    ax.scatter(
-        lon_1d_all, lat_1d_all,
-        transform=ccrs.PlateCarree(),
-        c="lightgray", s=3, alpha=0.7,
-        label="Unused"
-    )
-
-    # 7) Overplot used pixels
-    sc = ax.scatter(
-        lon_1d_all[mask],
-        lat_1d_all[mask],
-        transform=ccrs.PlateCarree(),
-        c=mean_bias[mask],
-        s=4, cmap="bwr", norm=norm, alpha=1
-    )
-
-    cb = plt.colorbar(sc, ax=ax, orientation='vertical', shrink=0.7)
-    cb.set_label("Mean Bias (Pred - Obs)")
-
-    plt.title(title)
-    plt.show()
+    plt.figure(figsize=(7,6))
+    plt.scatter(lon1d, lat1d, c="lightgray", s=5, alpha=0.6)
+    sc = plt.scatter(lon1d[mask], lat1d[mask], c=mean_b[mask],
+                     cmap="bwr", norm=norm, s=10)
+    plt.colorbar(sc, shrink=0.8, label="Mean Bias (Pred‑Obs)")
+    plt.xlabel("Longitude");  plt.ylabel("Latitude");  plt.title(title)
+    plt.tight_layout();  plt.show()
 
 ########################
 # Feature Importance
@@ -434,113 +396,101 @@ def plot_top5_feature_scatter(rf_model, X_valid, y_valid, cat_valid, feat_names,
         plt.tight_layout()
         plt.show()
 
-########################
-# 8) run experiment => random forest
-########################
+# ------------------------------------------------------------------
+# 8) run experiment => random forest  (UPDATED – Wilcoxon tests added)
+# ------------------------------------------------------------------
 def run_spatiotemporal_experiment(X_all, y_all, valid_mask, cat_2d,
                                   unburned_max_cat=0, ds=None,
                                   feat_names=None):
     """
-    Trains on the 'unburned' subset (up to cat <= unburned_max_cat),
-    then evaluates on unburned test, each cat separately,
-    and then on ALL valid data.
+    • Train only on 'unburned' samples  (cat ≤ unburned_max_cat)
+    • Evaluate on unburned test, on each cat separately, and on ALL data
+    • NEW: prints Wilcoxon rank‑sum p‑values for bias(c1/2/3) vs bias(c0)
     """
-    cat_flat  = cat_2d.ravel(order='C')
-    cat_valid = cat_flat[valid_mask]
-    X_valid   = X_all[valid_mask]
-    y_valid   = y_all[valid_mask]
 
-    # Flatten Elevation + VegTyp
-    elev_2d = ds["Elevation"].values
-    veg_2d  = ds["VegTyp"].values
+    # ---- flatten masks & helper arrays ---------------------------------
+    cat_flat   = cat_2d.ravel(order='C')
+    cat_valid  = cat_flat[valid_mask]
+
+    X_valid, y_valid = X_all[valid_mask], y_all[valid_mask]
+
+    # store pixel index for later maps
     pixel_idx_full = np.tile(np.arange(ds.dims["pixel"]), ds.dims["year"])
+    pix_valid      = pixel_idx_full[valid_mask]
 
-    elev_1d_full = elev_2d.ravel(order='C')
-    veg_1d_full  = veg_2d.ravel(order='C')
+    # ---- 1. TRAIN on "unburned" subset ---------------------------------
+    is_unburned = cat_valid <= unburned_max_cat
+    print(f"Training on unburned (cat ≤ {unburned_max_cat}), "
+          f"N={is_unburned.sum()}")
 
-    elev_valid = elev_1d_full[valid_mask]
-    veg_valid  = veg_1d_full[valid_mask]
-    pix_valid  = pixel_idx_full[valid_mask]
-
-    # ------------------------------
-    # 1) TRAIN on unburned subset
-    # ------------------------------
-    is_unburned = (cat_valid <= unburned_max_cat)
-    n_unburn    = np.sum(is_unburned)
-    print(f" Train threshold => unburned up to cat={unburned_max_cat}, #unburned={n_unburn}")
-
-    if n_unburn == 0:
-        print("No unburned => can't train.")
-        return None
-
-    X_ub = X_valid[is_unburned]
-    y_ub = y_valid[is_unburned]
-
-    X_train, X_test, y_train, y_test = train_test_split(
+    X_ub, y_ub = X_valid[is_unburned], y_valid[is_unburned]
+    X_tr, X_te, y_tr, y_te = train_test_split(
         X_ub, y_ub, test_size=0.3, random_state=42
     )
-    print(f"   unburned train={len(X_train)}, test={len(X_test)}")
 
     rf = RandomForestRegressor(n_estimators=100, random_state=42)
-    rf.fit(X_train, y_train)
+    rf.fit(X_tr, y_tr)
 
-    # Evaluate on unburned TRAIN
-    y_pred_train = rf.predict(X_train)
-    plot_scatter(y_train, y_pred_train, f"Unburned Train (cat<={unburned_max_cat})")
-    plot_bias_hist(y_train, y_pred_train,
-                   title=f"Bias Hist: Unburned Train (cat<={unburned_max_cat})")
+    # ---- 2. Diagnostics for unburned TRAIN / TEST ----------------------
+    plot_scatter(y_tr, rf.predict(X_tr),
+                 f"Unburned Train (cat ≤ {unburned_max_cat})")
+    plot_bias_hist(y_tr, rf.predict(X_tr),
+                   f"Bias Hist: Unburned Train (cat ≤ {unburned_max_cat})")
 
-    # Evaluate on unburned TEST
-    y_pred_ub = rf.predict(X_test)
-    plot_scatter(y_test, y_pred_ub, f"Unburned Test (cat<={unburned_max_cat})")
-    plot_bias_hist(y_test, y_pred_ub,
-                   title=f"Bias Hist: Unburned Test (cat<={unburned_max_cat})")
+    y_pred_ub = rf.predict(X_te)
+    plot_scatter(y_te, y_pred_ub,
+                 f"Unburned Test (cat ≤ {unburned_max_cat})")
+    plot_bias_hist(y_te, y_pred_ub,
+                   f"Bias Hist: Unburned Test (cat ≤ {unburned_max_cat})")
 
-    # ------------------------------
-    # 2) Evaluate on each cat=0..3
-    # ------------------------------
-    for cval in [0,1,2,3]:
-        sel_cat = (cat_valid == cval)
-        if np.sum(sel_cat) == 0:
-            print(f"No samples cat={cval}")
-            continue
-        X_c = X_valid[sel_cat]
-        y_c = y_valid[sel_cat]
-        y_pred_c = rf.predict(X_c)
-
-        plot_scatter(y_c, y_pred_c, title=f"Category={cval}")
-        plot_bias_hist(y_c, y_pred_c, title=f"Bias Hist: cat={cval}")
-
-        # pixel-level bias map
-        px_c = pix_valid[sel_cat]
-        produce_pixel_bias_map_hr_background(ds, px_c, y_c, y_pred_c,
-            title=f"Pixel Bias: cat={cval}")
-
-        # Combined boxplot for (ElevationBin, VegTyp)
-        cat_label = f"cat={cval}, thr={unburned_max_cat}"
-        y_dod_cat = y_valid[sel_cat]
-        elev_cat  = elev_valid[sel_cat]
-        veg_cat   = veg_valid[sel_cat]
-        plot_boxplot_dod_by_elev_veg(y_dod_cat, elev_cat, veg_cat,
-                                     cat_label=cat_label)
-
-    # ------------------------------
-    # 3) Evaluate on ALL valid data
-    #    (Color-coded scatter here!)
-    # ------------------------------
+    # ---- 3. Evaluate on ALL valid data ---------------------------------
     y_pred_all = rf.predict(X_valid)
-    # Instead of single-color scatter, do a color-coded scatter:
+
+    # 3‑A) colour‑coded scatter
     plot_scatter_by_cat(y_valid, y_pred_all, cat_valid,
                         title=f"All Data (thr={unburned_max_cat})")
-
-    # Keep the same bias hist, etc.
     plot_bias_hist(y_valid, y_pred_all,
                    title=f"Bias Hist: All Data (thr={unburned_max_cat})")
 
-    produce_pixel_bias_map_hr_background(ds, pix_valid, y_valid, y_pred_all,
-        title=f"Pixel Bias: All Data (thr={unburned_max_cat})")
+    # 3‑B) simple bias map
+    produce_pixel_bias_map_simple(
+        ds, pix_valid, y_valid, y_pred_all,
+        title=f"Pixel Bias: All Data (thr={unburned_max_cat})"
+    )
 
+    # ---- 4.  **NEW** Wilcoxon rank‑sum tests ---------------------------
+    bias_all = y_pred_all - y_valid
+    bias_by_cat = {c: bias_all[cat_valid == c] for c in range(4)
+                   if (cat_valid == c).any()}
+
+    if 0 in bias_by_cat:
+        print("\nWilcoxon rank‑sum test (bias difference vs. cat 0)")
+        for c in (1, 2, 3):
+            if c in bias_by_cat:
+                stat, p = ranksums(bias_by_cat[0], bias_by_cat[c])
+                print(f"  cat {c} vs 0  →  stat={stat:.3f},  p={p:.3g}")
+            else:
+                print(f"  cat {c} vs 0  →  no samples – skipped")
+
+    # ---- 5.  Per‑category plots / boxplots (unchanged) -----------------
+    for c in (0, 1, 2, 3):
+        sel = cat_valid == c
+        if not sel.any():
+            print(f"No samples in cat={c}")
+            continue
+        y_c, y_pred_c = y_valid[sel], y_pred_all[sel]
+        plot_scatter(y_c, y_pred_c, f"Category {c}")
+        plot_bias_hist(y_c, y_pred_c, f"Bias Hist: cat={c}")
+
+        # elevation/veg box‑plot
+        elev = ds["Elevation"].values.ravel(order="C")[valid_mask][sel]
+        veg  = ds["VegTyp"].values.ravel(order="C")[valid_mask][sel]
+        plot_boxplot_dod_by_elev_veg(y_c, elev, veg,
+                                     cat_label=f"cat={c}, thr={unburned_max_cat}")
+
+    # ---- 6.  Return model ----------------------------------------------
     return rf
+
 
 ###############################
 # MAIN

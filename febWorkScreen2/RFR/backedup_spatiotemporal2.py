@@ -100,11 +100,12 @@ def compute_burn_cumsum_with_initial(ds, pre_burn):
 # 3) Gather features
 ########################
 def gather_spatiotemporal_features(ds, target_var="DOD"):
+    # Exclude 'burn_fraction' so it is NOT used as a predictor
     exclude_vars = {
         target_var.lower(),
         'lat','lon','latitude','longitude',
         'pixel','year','ncoords_vector','nyears_vector',
-        'burn_fraction'  # explicitly exclude burn_fraction as a predictor
+        'burn_fraction'
     }
     all_feats = {}
     ny = ds.dims['year']
@@ -390,7 +391,8 @@ def plot_top5_feature_scatter(rf_model, X_valid, y_valid, cat_valid, feat_names,
        - x-axis = Observed DOD
        - y-axis = Feature Value
        - Color-coded by category (0..3)
-       - A dotted line of best fit for the entire data (all categories together).
+       - [Modified] Show correlation (instead of best-fit line).
+       - [Modified] Make each point smaller (s=10).
     """
     importances = rf_model.feature_importances_
     idx_sorted = np.argsort(importances)[::-1]  # descending
@@ -403,33 +405,32 @@ def plot_top5_feature_scatter(rf_model, X_valid, y_valid, cat_valid, feat_names,
         feat_vals = X_valid[:, feat_idx]  # shape (#valid,)
 
         plt.figure(figsize=(6,5))
-        # Scatter by category
+
+        # Plot points by category
         for cval, ccolor in cat_colors.items():
             sel_c = (cat_valid == cval)
             plt.scatter(
-                y_valid[sel_c],  # x-axis => Observed DOD
-                feat_vals[sel_c],# y-axis => Feature Value
+                y_valid[sel_c],       # x-axis => Observed DOD
+                feat_vals[sel_c],     # y-axis => Feature Value
                 c=ccolor,
                 alpha=0.4,
+                s=10,                 # smaller marker size
                 label=f"cat={cval}"
             )
-        # line of best fit => across ALL data
-        x_all = y_valid
-        y_all = feat_vals
-        mask_lin = np.isfinite(x_all) & np.isfinite(y_all)
+
+        # Calculate correlation (across ALL data points in this subset):
+        mask_lin = np.isfinite(y_valid) & np.isfinite(feat_vals)
         if np.sum(mask_lin) > 2:
-            x_lin = x_all[mask_lin]
-            y_lin = y_all[mask_lin]
-            p = np.polyfit(x_lin, y_lin, 1)  # slope, intercept
-            x_min, x_max = np.min(x_lin), np.max(x_lin)
-            x_vals = np.linspace(x_min, x_max, 100)
-            y_fit  = np.polyval(p, x_vals)
-            plt.plot(x_vals, y_fit, 'k--', label=f"Best fit (y={p[0]:.2f}x+{p[1]:.2f})")
+            r_val = np.corrcoef(y_valid[mask_lin], feat_vals[mask_lin])[0,1]
+        else:
+            r_val = np.nan
+
+        # Put correlation in the legend title
+        plt.legend(title=f"r={r_val:.2f}", loc="best")
 
         plt.xlabel("Observed DOD")
         plt.ylabel(f"{fname}")
         plt.title(f"{title_prefix}: Feature={fname}")
-        plt.legend()
         plt.tight_layout()
         plt.show()
 
