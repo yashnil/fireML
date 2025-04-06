@@ -13,6 +13,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 
 from scipy.stats import ranksums  # for Wilcoxon rank-sum tests
 import numpy.random as npr  # for random sampling in the final new step
+from typing import List, Tuple, Optional
 
 ############################################################
 # 0) LOAD COORDINATES
@@ -461,6 +462,35 @@ def plot_top5_feature_scatter(rf_model, X_valid, y_valid, cat_valid, feat_names,
         plt.tight_layout()
         plt.show()
 
+# ------------------------------------------------------------------
+# 8‑A) **NEW** helper: metrics for arbitrary burn‑fraction bins
+# ------------------------------------------------------------------
+def evaluate_metrics_per_bin(y_true: np.ndarray,
+                              y_pred: np.ndarray,
+                              burn_vals: np.ndarray,
+                              bins: list[tuple[float, Optional[float]]],
+                              label: str = "BurnFrac") -> None:
+    """
+    Print RMSE / Bias / R² for each (lo, hi] interval in *bins*.
+    A *hi* of None means 'greater than lo'.
+    """
+    for lo, hi in bins:
+        if hi is None:                         # open upper bound
+            sel = burn_vals > lo
+            tag = f">{lo*100:.0f}%"
+        else:
+            sel = (burn_vals >= lo) & (burn_vals < hi)
+            tag = f"{lo*100:.0f}-{hi*100:.0f}%"
+        n = int(np.sum(sel))
+        if n == 0:
+            print(f"{label} {tag:>7}:  N=0 – skipped")
+            continue
+        rmse = np.sqrt(mean_squared_error(y_true[sel], y_pred[sel]))
+        bias = np.mean(y_pred[sel] - y_true[sel])
+        r2   = r2_score(y_true[sel], y_pred[sel]) if n > 1 else np.nan
+        print(f"{label} {tag:>7}:  N={n:5d}  RMSE={rmse:6.2f}  "
+              f"Bias={bias:7.2f}  R²={r2:6.3f}")
+
 ############################################################
 # 8) The NEW random forest experiment
 #    + Wilcoxon rank-sum test
@@ -620,6 +650,20 @@ def run_rf_incl_burn_categorized(X_all, y_all, cat_2d, valid_mask, ds, feat_name
     # Also do color-coded scatter for ALL test samples
     plot_scatter_by_cat(y_test, y_pred_test, cat_test,
                         title="RF: All Test Data, color by cat")
+
+    # ---------- *NEW* 10 % burn‑fraction‑bin evaluation -------------
+    if "burn_fraction" in feat_names:
+        burn_idx = feat_names.index("burn_fraction")
+        burn_test = X_test[:, burn_idx]      # per‑sample instantaneous burn fraction
+
+        ten_pct_bins = [(0.0, 0.1), (0.1, 0.2), (0.2, 0.3), (0.3, 0.4),
+                        (0.4, 0.5), (0.5, 0.6), (0.6, 0.7), (0.7, 0.8),
+                        (0.8, 0.9), (0.9, None)]
+
+        print("\n=== Performance by *10 %* burn‑fraction bins (Test set) ===")
+        evaluate_metrics_per_bin(y_test, y_pred_test, burn_test, ten_pct_bins)
+    else:
+        print("[WARN] 'burn_fraction' not in feature list – skipping 10 %‑bin metrics.")
 
     # [OLD] Pixel-level bias map with high-res background (commented out)
     # produce_pixel_bias_map_hr_background(ds, pix_test, y_test, y_pred_test,

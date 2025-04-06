@@ -13,6 +13,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 
 from scipy.stats import ranksums  # for Wilcoxon rank-sum tests
 import numpy.random as npr  # for random subsampling in the final step
+from typing import List, Tuple, Optional
 
 ############################################################
 # 0) LOAD COORDINATES
@@ -229,66 +230,62 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title="Scatter by Category"):
     plt.tight_layout()
     plt.show()
 
-############################################################
-# 6) Additional Visualization: pixel-level bias map, boxplot
-############################################################
-def produce_pixel_bias_map_hr_background(ds, pixel_idx, y_true, y_pred,
-        lat_var="latitude", lon_var="longitude",
-        title="Pixel Bias: High-Res Background"):
-    from matplotlib.colors import TwoSlopeNorm
-    tiler = cimgt.Stamen('terrain')
-    n_pixels = ds.dims["pixel"]
-    sum_bias = np.zeros(n_pixels, dtype=float)
-    count    = np.zeros(n_pixels, dtype=float)
+# ──────────────────────────────────────────────────────────
+# 6‑A) **NEW** simple grid maps  (bias & mean DoD)
+# ──────────────────────────────────────────────────────────
+from matplotlib.colors import TwoSlopeNorm     # used in both helpers
 
-    residuals = y_pred - y_true
-    for i, px in enumerate(pixel_idx):
-        sum_bias[px] += residuals[i]
-        count[px]    += 1
+def produce_pixel_bias_map_simple(ds, pixel_idx, y_true, y_pred,
+                                  lat_var="latitude", lon_var="longitude",
+                                  title="Pixel Bias: Simple Grid"):
+    """
+    Scatter of (lon, lat) coloured by mean bias (Pred‑Obs) per pixel.
+    No background tiles.  Handles the edge‑case where all biases are zero.
+    """
+    n_pix = ds.dims["pixel"]
+    sum_b, cnt = np.zeros(n_pix), np.zeros(n_pix)
 
-    mean_bias = np.full(n_pixels, np.nan, dtype=float)
-    mask = (count > 0)
-    mean_bias[mask] = sum_bias[mask] / count[mask]
+    for px, res in zip(pixel_idx, y_pred - y_true):
+        sum_b[px] += res
+        cnt[px]   += 1
 
-    lat_full = ds[lat_var].values
-    lon_full = ds[lon_var].values
+    mean_b = np.full(n_pix, np.nan)
+    mask   = cnt > 0
+    mean_b[mask] = sum_b[mask] / cnt[mask]
 
-    if lat_full.ndim == 2:
-        lat_1d_all = lat_full[0, :]
-        lon_1d_all = lon_full[0, :]
-    else:
-        lat_1d_all = lat_full
-        lon_1d_all = lon_full
+    # 1‑D coordinates
+    lat = ds[lat_var].values
+    lon = ds[lon_var].values
+    lat1d = lat[0] if lat.ndim == 2 else lat
+    lon1d = lon[0] if lon.ndim == 2 else lon
 
-    max_abs = np.nanmax(np.abs(mean_bias))
-    if np.isnan(max_abs):
-        max_abs = 1.0
+    # colour scaling – ensure vmax > 0 to satisfy TwoSlopeNorm
+    vmax = np.nanmax(np.abs(mean_b))
+    if not np.isfinite(vmax) or vmax == 0:
+        vmax = 1e-6                          # tiny positive number
+    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
 
-    norm = TwoSlopeNorm(vmin=-max_abs, vcenter=0, vmax=max_abs)
+    plt.figure(figsize=(7,6))
+    plt.scatter(lon1d, lat1d, c="lightgray", s=5, alpha=0.6)
+    sc = plt.scatter(lon1d[mask], lat1d[mask], c=mean_b[mask],
+                     cmap="bwr", norm=norm, s=10)
+    plt.colorbar(sc, shrink=0.8, label="Mean Bias (Pred‑Obs)")
+    plt.xlabel("Longitude");  plt.ylabel("Latitude");  plt.title(title)
+    plt.tight_layout();  plt.show()
 
-    fig = plt.figure(figsize=(9,7))
-    ax = plt.axes(projection=tiler.crs)
-    ax.set_extent([-125, -113, 32, 42], crs=ccrs.PlateCarree())
-    ax.add_image(tiler, 8)
-    ax.add_feature(cfeature.BORDERS, linewidth=0.5, alpha=0.5)
-    ax.add_feature(cfeature.STATES, linewidth=0.5, alpha=0.5)
-
-    ax.scatter(
-        lon_1d_all, lat_1d_all,
-        transform=ccrs.PlateCarree(),
-        c="lightgray", s=3, alpha=0.7, label="Unused"
-    )
-    sc = ax.scatter(
-        lon_1d_all[mask],
-        lat_1d_all[mask],
-        transform=ccrs.PlateCarree(),
-        c=mean_bias[mask],
-        s=4, cmap="bwr", norm=norm, alpha=1
-    )
-    cb = plt.colorbar(sc, ax=ax, orientation='vertical', shrink=0.7)
-    cb.set_label("Mean Bias (Pred - Obs)")
-    plt.title(title)
-    plt.show()
+def plot_mean_dod_map_simple(ds, mean_vals,
+                             lat_var="latitude", lon_var="longitude",
+                             title="Mean DoD"):
+    """Scatter map of mean DoD."""
+    lat = ds[lat_var].values
+    lon = ds[lon_var].values
+    lat1d = lat[0] if lat.ndim == 2 else lat
+    lon1d = lon[0] if lon.ndim == 2 else lon
+    plt.figure(figsize=(7,6))
+    sc = plt.scatter(lon1d, lat1d, c=mean_vals, cmap="viridis", s=10)
+    plt.colorbar(sc, shrink=0.8, label="Mean DoD (days)")
+    plt.xlabel("Longitude");  plt.ylabel("Latitude");  plt.title(title)
+    plt.tight_layout();  plt.show()
 
 def plot_boxplot_dod_by_elev_veg(y_dod, elev, vegtyp, cat_label="c0"):
     elev_edges = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500]
@@ -377,189 +374,197 @@ def plot_top5_feature_scatter(rf_model, X_valid, y_valid, cat_valid, feat_names,
         plt.tight_layout()
         plt.show()
 
+# ──────────────────────────────────────────────────────────
+# 8‑A) **NEW** metrics for arbitrary burn‑fraction bins
+# ──────────────────────────────────────────────────────────
+def evaluate_metrics_per_bin(y_true: np.ndarray,
+                              y_pred: np.ndarray,
+                              burn_vals: np.ndarray,
+                              bins: List[Tuple[float, Optional[float]]],
+                              label: str = "BurnFrac") -> None:
+    """Print RMSE / Bias / R² for each (lo, hi] bin."""
+    for lo, hi in bins:
+        if hi is None:
+            sel = burn_vals > lo;         tag = f">{lo*100:.0f}%"
+        else:
+            sel = (burn_vals >= lo) & (burn_vals < hi)
+            tag = f"{lo*100:.0f}-{hi*100:.0f}%"
+        n = sel.sum()
+        if n == 0:
+            print(f"{label} {tag:>7}: N=0 – skipped");  continue
+        rmse = np.sqrt(mean_squared_error(y_true[sel], y_pred[sel]))
+        bias = (y_pred[sel] - y_true[sel]).mean()
+        r2   = r2_score(y_true[sel], y_pred[sel]) if n > 1 else np.nan
+        print(f"{label} {tag:>7}: N={n:5d}  RMSE={rmse:6.2f}  "
+              f"Bias={bias:7.2f}  R²={r2:6.3f}")
+
 ############################################################
 # 8) Random Forest Experiment (NoBurnFrac)
 #    70/30 split per category
 #    Add rank-sum tests, downsampling, saving .txt data
 ############################################################
-def run_rf_excluding_burnfraction(X_all, y_all, cat_2d, valid_mask, ds, feat_names):
-    from sklearn.model_selection import train_test_split
-    from scipy.stats import ranksums
+def run_rf_excluding_burnfraction(
+        X_all: np.ndarray,
+        y_all: np.ndarray,
+        cat_2d: np.ndarray,
+        valid_mask: np.ndarray,
+        ds: xr.Dataset,
+        feat_names: list[str]
+    ):
+    """
+    Train / evaluate a Random‑Forest **without** using `burn_fraction`
+    (it was excluded upstream) but with the full evaluation suite:
 
-    cat_flat_all = cat_2d.ravel(order='C')
-    cat_valid    = cat_flat_all[valid_mask]
+    • 70/30 split within each cumulative‑burn category (c0–c3)  
+    • Standard scatter & bias‑hist plots  
+    • Wilcoxon rank‑sum tests (c1–c3 vs. c0)  
+    • Down‑sampling robustness check  
+    • Saves per‑category obs / pred to .txt  
+    • 25 %‑bin scatter plot (handled elsewhere)  
+    • **NEW:** RMSE / Bias / R² for 10 % burn‑fraction bins (eval‑only)  
+    • **NEW:** Lightweight bias map & mean‑DoD maps (no Cartopy tiles)  
+    • Feature‑importance & top‑5 feature scatter plots
+    """
 
-    X_valid = X_all[valid_mask]
-    y_valid = y_all[valid_mask]
+    # ── 0.  Flatten categories & select valid rows ───────────────────
+    cat_flat   = cat_2d.ravel(order="C")
+    cat_valid  = cat_flat[valid_mask]
 
-    train_indices = []
-    test_indices  = []
+    X_valid, y_valid = X_all[valid_mask], y_all[valid_mask]
 
-    valid_idxs = np.where(valid_mask)[0]
-
-    # 70/30 splitting for each category => train/test
-    for cval in [0,1,2,3]:
-        cat_mask = (cat_valid == cval)
-        cat_rows = np.where(cat_mask)[0]
-        if len(cat_rows) == 0:
-            print(f"Category {cval} has no valid data. Skipping.")
+    # ── 1.  70 / 30 train‑test split **within each cat** ─────────────
+    train_idx, test_idx = [], []
+    for c in (0, 1, 2, 3):
+        rows = np.where(cat_valid == c)[0]
+        if rows.size == 0:
+            print(f"cat={c}: no valid rows – skipped")
             continue
+        tr, te = train_test_split(rows, test_size=0.3, random_state=42)
+        train_idx.append(tr);  test_idx.append(te)
 
-        train_c, test_c = train_test_split(cat_rows, test_size=0.3, random_state=42)
-        train_indices.append(train_c)
-        test_indices.append(test_c)
+    if not train_idx:
+        print("No training data available – abort.");  return None
 
-    if not train_indices:
-        print("No training data => cannot proceed.")
-        return None
+    train_idx = np.concatenate(train_idx)
+    test_idx  = np.concatenate(test_idx)
 
-    train_indices = np.concatenate(train_indices)
-    test_indices  = np.concatenate(test_indices)
+    X_train, y_train = X_valid[train_idx], y_valid[train_idx]
+    X_test,  y_test  = X_valid[test_idx],  y_valid[test_idx]
 
-    X_train = X_valid[train_indices]
-    y_train = y_valid[train_indices]
-    X_test  = X_valid[test_indices]
-    y_test  = y_valid[test_indices]
-
-    # Train the forest
+    # ── 2.  Train RF ─────────────────────────────────────────────────
     rf = RandomForestRegressor(n_estimators=100, random_state=42)
     rf.fit(X_train, y_train)
 
-    # Evaluate on TRAIN
+    # ── 3.  Basic plots (train / test) ───────────────────────────────
     y_pred_train = rf.predict(X_train)
-    plot_scatter(y_train, y_pred_train, title="RF (NoBurnFrac): Train (70% each cat)")
-    plot_bias_hist(y_train, y_pred_train, title="RF (NoBurnFrac): Bias Hist (Train)")
+    plot_scatter(y_train, y_pred_train,
+                 title="RF (NoBurnFrac): Train (70 % each cat)")
+    plot_bias_hist(y_train, y_pred_train,
+                   title="RF (NoBurnFrac): Bias Hist (Train)")
 
-    # Evaluate on TEST (all cats combined)
     y_pred_test = rf.predict(X_test)
-    plot_scatter(y_test, y_pred_test, title="RF (NoBurnFrac): Test (30% each cat)")
-    plot_bias_hist(y_test, y_pred_test, title="RF (NoBurnFrac): Bias Hist (Test)")
+    plot_scatter(y_test, y_pred_test,
+                 title="RF (NoBurnFrac): Test (30 % each cat)")
+    plot_bias_hist(y_test, y_pred_test,
+                   title="RF (NoBurnFrac): Bias Hist (Test)")
 
-    # --------------------------
-    # Wilcoxon rank-sum => c1..c3 vs c0
-    # --------------------------
-    cat_test = cat_valid[test_indices]
-    biases_dict = {}
-    for cval in [0,1,2,3]:
-        mask_c = (cat_test == cval)
-        if np.any(mask_c):
-            y_c     = y_test[mask_c]
-            y_predc = y_pred_test[mask_c]
-            bias_c  = y_predc - y_c
-            biases_dict[cval] = bias_c
+    # ── 4.  Wilcoxon rank‑sum tests  (c1–c3 vs. c0) ─────────────────
+    cat_test = cat_valid[test_idx]
+    bias_by_cat = {c: y_pred_test[cat_test == c] - y_test[cat_test == c]
+                   for c in range(4) if np.any(cat_test == c)}
 
-    # rank-sum c1..c3 vs c0
-    if 0 in biases_dict:
-        for cval in [1,2,3]:
-            if cval in biases_dict:
-                b0 = biases_dict[0]
-                bc = biases_dict[cval]
-                stat, pval = ranksums(b0, bc)
-                print(f"[NoBurnFrac] Wilcoxon rank-sum c{cval} vs c0: stat={stat:.3f}, p={pval:.3g}")
-            else:
-                print(f"[NoBurnFrac] No test data for cat={cval}, skipping rank-sum vs c0.")
+    if 0 in bias_by_cat:
+        for c in (1, 2, 3):
+            if c in bias_by_cat:
+                stat, p = ranksums(bias_by_cat[0], bias_by_cat[c])
+                print(f"[NoBurnFrac] Wilcoxon c{c} vs c0: stat={stat:.3f}, p={p:.3g}")
 
-    # --------------------------
-    # Downsampling approach
-    # --------------------------
-    test_counts = {}
-    for cval in [0,1,2,3]:
-        mask_c = (cat_test == cval)
-        n_c = np.sum(mask_c)
-        if n_c > 0:
-            test_counts[cval] = n_c
+    # ── 5.  Down‑sampling robustness check ───────────────────────────
+    counts = {c: (cat_test == c).sum() for c in range(4) if (cat_test == c).any()}
+    if counts:
+        min_cat  = min(counts, key=counts.get)
+        min_cnt  = counts[min_cat]
+        print(f"[NoBurnFrac] Fewest test samples: c{min_cat} (N={min_cnt})")
 
-    if not test_counts:
-        print("[NoBurnFrac] No test data => no downsampling test.")
-    else:
-        minCat   = min(test_counts, key=test_counts.get)
-        minCount = test_counts[minCat]
-        print(f"[NoBurnFrac] Category with fewest test samples = c{minCat}, count={minCount}")
+        for c, n_c in counts.items():
+            if n_c < min_cnt:  continue
+            rmses, biases = [], []
+            for _ in range(10):
+                idx = npr.choice(np.where(cat_test == c)[0], size=min_cnt, replace=False)
+                rmses.append(np.sqrt(mean_squared_error(y_test[idx], y_pred_test[idx])))
+                biases.append((y_pred_test[idx] - y_test[idx]).mean())
+            print(f"[NoBurnFrac] c{c}: mean RMSE={np.mean(rmses):.3f}, "
+                  f"mean Bias={np.mean(biases):.3f}")
 
-        n_runs = 10
-        for cval in test_counts:
-            c_mask = (cat_test == cval)
-            idx_c  = np.where(c_mask)[0]
-            if len(idx_c) < minCount:
-                print(f"[NoBurnFrac] cat={cval} has <{minCount} => skip sampling.")
-                continue
+    # ── 6.  Save per‑cat obs / pred to .txt ──────────────────────────
+    for c in range(4):
+        sel = cat_test == c
+        if not sel.any():  continue
+        np.savetxt(f"/Users/yashnilmohanty/Desktop/obs_DOD_cat{c}_NoBF.txt",
+                   y_test[sel],  fmt="%.6f")
+        np.savetxt(f"/Users/yashnilmohanty/Desktop/pred_DOD_cat{c}_NoBF.txt",
+                   y_pred_test[sel], fmt="%.6f")
 
-            biases_list = []
-            rmse_list   = []
-            for _ in range(n_runs):
-                sub_idx = npr.choice(idx_c, size=minCount, replace=False)
-                y_sub   = y_test[sub_idx]
-                yp_sub  = y_pred_test[sub_idx]
-                bias_sub= yp_sub - y_sub
-                mean_bias = np.mean(bias_sub)
-                mean_rmse = np.sqrt(mean_squared_error(y_sub, yp_sub))
-                biases_list.append(mean_bias)
-                rmse_list.append(mean_rmse)
+    # ── 7.  Per‑cat scatter / hist ───────────────────────────────────
+    for c in range(4):
+        sel = cat_test == c
+        if sel.any():
+            plot_scatter(y_test[sel], y_pred_test[sel],
+                         title=f"RF (NoBurnFrac): Test cat={c}")
+            plot_bias_hist(y_test[sel], y_pred_test[sel],
+                           title=f"RF (NoBurnFrac): Bias Hist cat={c}")
 
-            avg_bias = np.mean(biases_list)
-            avg_rmse = np.mean(rmse_list)
-            print(f"[NoBurnFrac] cat={cval}, {n_runs} runs of size={minCount},"
-                  f" mean bias={avg_bias:.3f}, mean RMSE={avg_rmse:.3f}")
-
-    # --------------------------
-    # Save predicted + observed DoD => .txt
-    # --------------------------
-    for cval in [0,1,2,3]:
-        test_sel = (cat_test == cval)
-        if not np.any(test_sel):
-            print(f"[NoBurnFrac] cat={cval} => no test => skip .txt save.")
-            continue
-
-        y_c = y_test[test_sel]
-        y_pred_c = y_pred_test[test_sel]
-
-        obs_outfile  = f"/Users/yashnilmohanty/Desktop/obs_DOD_cat{cval}_NoBurnFrac.txt"
-        pred_outfile = f"/Users/yashnilmohanty/Desktop/pred_DOD_cat{cval}_NoBurnFrac.txt"
-        np.savetxt(obs_outfile,  y_c,      fmt="%.6f")
-        np.savetxt(pred_outfile, y_pred_c, fmt="%.6f")
-
-        print(f"[NoBurnFrac] Saved cat={cval} => {obs_outfile}, {pred_outfile}")
-
-    # Evaluate on each cat=0..3 in the test set
-    for cval in [0,1,2,3]:
-        test_sel = (cat_test == cval)
-        if not np.any(test_sel):
-            print(f"[NoBurnFrac] No test samples cat={cval} => skip cat-level plots.")
-            continue
-        X_c = X_test[test_sel]
-        y_c = y_test[test_sel]
-        y_pred_c = rf.predict(X_c)
-
-        plot_scatter(y_c, y_pred_c, title=f"RF (NoBurnFrac): Test cat={cval}")
-        plot_bias_hist(y_c, y_pred_c, title=f"RF (NoBurnFrac) Bias Hist: Test cat={cval}")
-
-    # Color-coded scatter for ALL test data
+    # Color‑coded scatter for all test data
     plot_scatter_by_cat(y_test, y_pred_test, cat_test,
-        title="RF (NoBurnFrac): All Test Data by Cat")
+                        title="RF (NoBurnFrac): All Test Data by Cat")
 
-    # Pixel-level bias map
-    pixel_idx_full = np.tile(np.arange(ds.dims["pixel"]), ds.dims["year"])
-    pix_valid = pixel_idx_full[valid_mask]
-    pix_test  = pix_valid[test_indices]
-    produce_pixel_bias_map_hr_background(ds, pix_test, y_test, y_pred_test,
-        title="Pixel Bias: All Test Data (NoBurnFrac)")
+    # ── 8.  **NEW** 10 % burn‑fraction‑bin metrics ───────────────────
+    burn_flat  = ds["burn_fraction"].values.ravel(order="C")
+    burn_valid = burn_flat[valid_mask]
+    burn_test  = burn_valid[test_idx]
 
-    # Boxplot by elev/veg => entire TEST
-    elev_2d = ds["Elevation"].values
-    veg_2d  = ds["VegTyp"].values
-    elev_valid = elev_2d.ravel(order='C')[valid_mask]
-    veg_valid  = veg_2d.ravel(order='C')[valid_mask]
-    elev_test  = elev_valid[test_indices]
-    veg_test   = veg_valid[test_indices]
-    plot_boxplot_dod_by_elev_veg(y_test, elev_test, veg_test,
-        cat_label="AllTest (NoBurnFrac)")
+    ten_bins = [(0.0,0.1),(0.1,0.2),(0.2,0.3),(0.3,0.4),
+                (0.4,0.5),(0.5,0.6),(0.6,0.7),(0.7,0.8),
+                (0.8,0.9),(0.9,None)]
+    print("\n=== 10 % burn‑fraction bins (NoBurnFrac, Test set) ===")
+    evaluate_metrics_per_bin(y_test, y_pred_test, burn_test, ten_bins)
 
-    # Feature importance
-    plot_top10_features(rf, feat_names, title="RF (NoBurnFrac) Top 10 Importances")
-    plot_top5_feature_scatter(rf, X_test, y_test, cat_test, feat_names,
-        title_prefix="(NoBurnFrac)")
+    # ── 9.  **NEW** simple bias map ──────────────────────────────────
+    pix_full  = np.tile(np.arange(ds.dims["pixel"]), ds.dims["year"])
+    pix_valid = pix_full[valid_mask]
+    pix_test  = pix_valid[test_idx]
+    produce_pixel_bias_map_simple(ds, pix_test, y_test, y_pred_test,
+                                  title="Pixel Bias: Simple Grid (NoBurnFrac)")
 
+    # ── 10.  Box‑plot by elevation / veg ‑ unchanged ────────────────
+    elev = ds["Elevation"].values.ravel(order="C")[valid_mask][test_idx]
+    veg  = ds["VegTyp"].values.ravel(order="C")[valid_mask][test_idx]
+    plot_boxplot_dod_by_elev_veg(y_test, elev, veg,
+                                 cat_label="AllTest (NoBurnFrac)")
+
+    # ── 11.  Feature importance & top‑5 scatter ─────────────────────
+    plot_top10_features(rf, feat_names,
+                        title="RF (NoBurnFrac): Top‑10 Feature Importance")
+    plot_top5_feature_scatter(rf, X_test, y_test, cat_test,
+                              feat_names, title_prefix="(NoBurnFrac)")
+
+    # ── 12.  **NEW** mean predicted / observed DoD maps ─────────────
+    y_pred_all = rf.predict(X_valid)
+    n_pix = ds.dims["pixel"]
+    sum_p = np.zeros(n_pix);  sum_o = np.zeros(n_pix);  cnt = np.zeros(n_pix)
+    for px, obs, pred in zip(pix_valid, y_valid, y_pred_all):
+        sum_p[px] += pred;  sum_o[px] += obs;  cnt[px] += 1
+    mean_pred = np.where(cnt > 0, sum_p / cnt, np.nan)
+    mean_obs  = np.where(cnt > 0, sum_o / cnt, np.nan)
+
+    plot_mean_dod_map_simple(ds, mean_pred,
+                             title="Mean Predicted DoD (NoBurnFrac)")
+    plot_mean_dod_map_simple(ds, mean_obs,
+                             title="Mean Observed DoD (NoBurnFrac)")
+
+    # ── 13.  Return fitted model ────────────────────────────────────
     return rf
+
 
 ############################################################
 # MAIN
