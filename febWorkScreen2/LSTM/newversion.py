@@ -88,7 +88,9 @@ def plot_top5_feat_scatter(imp, X, y, cat, names, prefix):
 def gather_features_nobf(ds, target="DOD"):
     excl = {target.lower(),'lat','lon','latitude','longitude',
             'pixel','year','ncoords_vector','nyears_vector',
-            'burn_fraction','burn_cumsum'}
+            'burn_fraction','burn_cumsum','aorcsummerhumidity',
+            'aorcsummerprecipitation','aorcsummerlongwave',
+            'aorcsummershortwave','aorcsummertemperature'}
     ny = ds.sizes['year'];  feats = {}
     for v in ds.data_vars:
         if v.lower() in excl:  continue
