@@ -143,74 +143,59 @@ def plot_top5_feature_scatter(rf, X, y, cat, names, prefix):
 
 
 # ── refined spatial helpers ─────────────────────────────────────────
-def _setup_ca_axes(title: str):
-    ax = plt.axes(projection=ccrs.PlateCarree())
-    ax.set_extent([-125, -113, 32, 42], crs=ccrs.PlateCarree())
-    ax.add_feature(cfeature.STATES, linewidth=0.6)
-    ax.coastlines(resolution="10m", linewidth=0.5)
+def _setup_ca_axes(title:str):
+    ax=plt.axes(projection=ccrs.PlateCarree())
+    ax.set_extent([-125,-113,32,42], crs=ccrs.PlateCarree())
+    ax.add_feature(cfeature.STATES, lw=0.6)
+    ax.coastlines(resolution="10m", lw=0.5)
     ax.set_title(title)
     return ax
 
 def dod_map_ca(ds, pix_idx, values, title,
-               cmap="viridis", vmin=50, vmax=250):
-    """Scatter map for DoD with fixed colour scale 50‑250."""
-    lat = ds["latitude"].values
-    lon = ds["longitude"].values
-    lat1 = lat[0] if lat.ndim == 2 else lat
-    lon1 = lon[0] if lon.ndim == 2 else lon
-
-    ax = _setup_ca_axes(title)
-    sc = ax.scatter(lon1[pix_idx], lat1[pix_idx],
-                    c=values, cmap=cmap,
-                    vmin=vmin, vmax=vmax,
-                    s=10, alpha=0.9,
-                    transform=ccrs.PlateCarree())
+               cmap="magma", vmin=50, vmax=250):
+    """Uniform‑scale DoD map (50‑250)."""
+    lat = ds["latitude"].values; lon = ds["longitude"].values
+    lat1 = lat[0] if lat.ndim==2 else lat
+    lon1 = lon[0] if lon.ndim==2 else lon
+    ax=_setup_ca_axes(title)
+    sc=ax.scatter(lon1[pix_idx], lat1[pix_idx],
+                  c=values, cmap=cmap,
+                  vmin=vmin, vmax=vmax,
+                  s=10, alpha=0.9,
+                  transform=ccrs.PlateCarree())
     plt.colorbar(sc, ax=ax, shrink=0.8, label="DoD (days)")
-    plt.tight_layout();  plt.show()
-
+    plt.tight_layout(); plt.show()
 
 def bias_map_ca(ds, pix_idx, y_true, y_pred, title):
-    """Mean pixel‑bias map on a California outline."""
+    """
+    Mean‑bias map with *fixed* colour scale −60…+60 days.
+    Values outside this range are clipped.
+    Background pixels removed.
+    """
     n_pix = ds.sizes["pixel"]
-    sum_b = np.zeros(n_pix)
-    cnt = np.zeros(n_pix)
-    for p, res in zip(pix_idx, y_pred - y_true):
-        sum_b[p] += res
-        cnt[p] += 1
-    mean_b = np.full(n_pix, np.nan)
-    valid = cnt > 0
-    mean_b[valid] = sum_b[valid] / cnt[valid]
+    sum_b=np.zeros(n_pix); cnt=np.zeros(n_pix)
+    for p,res in zip(pix_idx, y_pred-y_true):
+        sum_b[p]+=res; cnt[p]+=1
+    mean_b=np.full(n_pix,np.nan)
+    valid=cnt>0
+    mean_b[valid]=sum_b[valid]/cnt[valid]
 
-    lat = ds["latitude"].values
-    lon = ds["longitude"].values
-    lat1 = lat[0] if lat.ndim == 2 else lat
-    lon1 = lon[0] if lon.ndim == 2 else lon
+    # clip to ±60
+    mean_b=np.clip(mean_b, -60, 60)
 
-    if valid.any():
-        vmax = np.nanmax(np.abs(mean_b[valid]))
-    else:                          # every pixel is NaN → arbitrary tiny scale
-        vmax = 0.0
-    # force a strictly‑positive vmax so that -vmax < 0 < vmax
-    if (not np.isfinite(vmax)) or (vmax <= 0.0):
-        vmax = 1e-6
-    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+    lat = ds["latitude"].values; lon = ds["longitude"].values
+    lat1=lat[0] if lat.ndim==2 else lat
+    lon1=lon[0] if lon.ndim==2 else lon
 
-    ax = _setup_ca_axes(title)
-    ax.scatter(
-        lon1, lat1, c="lightgray", s=4, alpha=0.4, transform=ccrs.PlateCarree()
-    )
-    sc = ax.scatter(
-        lon1[valid],
-        lat1[valid],
-        c=mean_b[valid],
-        cmap="bwr",
-        norm=norm,
-        s=10,
-        transform=ccrs.PlateCarree(),
-    )
-    plt.colorbar(sc, ax=ax, shrink=0.8, label="Mean Bias (Pred‑Obs)")
-    plt.tight_layout()
-    plt.show()
+    ax=_setup_ca_axes(title)
+    sc=ax.scatter(lon1[valid], lat1[valid],
+                  c=mean_b[valid],
+                  cmap='seismic',           # 0 is light‑grey, stands out
+                  norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
+                  s=10, alpha=0.9,
+                  transform=ccrs.PlateCarree())
+    plt.colorbar(sc, ax=ax, shrink=0.8, label="Mean Bias (Pred‑Obs, days)")
+    plt.tight_layout(); plt.show()
 
 
 def boxplot_dod_by_elev_veg(y, elev, veg, tag):
