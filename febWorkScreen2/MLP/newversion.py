@@ -44,7 +44,7 @@ def plot_bias_hist(y_true, y_pred, title, rng=(-100,300)):
 
 def plot_scatter_by_cat(y_true, y_pred, cat, title):
     plt.figure(figsize=(6,6))
-    cols = {0:'red',1:'green',2:'blue',3:'orange'}
+    cols = {0:'red', 1:'yellow', 2:'green', 3:'blue'}
     for c,col in cols.items():
         m = cat==c
         if m.any():
@@ -65,19 +65,56 @@ def plot_top10_perm_importance(imp, names, title):
     plt.title(title);  plt.ylabel("Permutation importance (ΔMSE)")
     plt.tight_layout();  plt.show()
 
-def plot_top5_feat_scatter(imp, X, y, cat, names, prefix):
-    idx = np.argsort(imp)[::-1][:5]
-    cols = {0:'red',1:'blue',2:'green',3:'purple'}
-    for i in idx:
-        plt.figure(figsize=(6,5))
-        for c,col in cols.items():
-            m = cat==c
-            plt.scatter(y[m], X[m,i], c=col, alpha=0.4, s=10, label=f"cat={c}")
-        r = np.corrcoef(y, X[:,i])[0,1]
-        plt.legend(title=f"r={r:.2f}")
-        plt.xlabel("Observed DoD");  plt.ylabel(names[i])
-        plt.title(f"{prefix}: {names[i]}")
-        plt.tight_layout();  plt.show()
+def plot_top5_feature_scatter(imp, X, y, cat, names, prefix):
+    """
+    Aggregated Top-5 feature scatter:
+      – x-axis  = mean predictor value (pixels sharing DoD & category)
+      – y-axis  = observed DoD
+      – horizontal bar = ±1 SD
+      – one coloured line per cumulative-burn category
+    """
+    top5    = np.argsort(imp)[::-1][:5]
+    colours = {0:'red', 1:'yellow', 2:'green', 3:'blue'}
+    cats    = [0, 1, 2, 3]
+
+    for f_idx in top5:
+        fname = names[f_idx]
+        x_all = X[:, f_idx]
+
+        plt.figure(figsize=(7, 5))
+        for c in cats:
+            mask_c = (cat == c)
+            if not mask_c.any():
+                continue
+
+            r_val = np.corrcoef(x_all[mask_c], y[mask_c])[0, 1]
+
+            # aggregate by unique DoD
+            dod_vals, mean_x, sd_x = [], [], []
+            for d in np.unique(y[mask_c]):
+                m_d = mask_c & (y == d)
+                mean_x.append(np.mean(x_all[m_d]))
+                sd_x  .append(np.std (x_all[m_d]))
+                dod_vals.append(d)
+            dod_vals, mean_x, sd_x = map(np.asarray, (dod_vals, mean_x, sd_x))
+            order = np.argsort(dod_vals)
+            dod_vals, mean_x, sd_x = dod_vals[order], mean_x[order], sd_x[order]
+
+            plt.errorbar(mean_x, dod_vals,
+                         xerr=sd_x,
+                         fmt='o', ms=4, lw=1,
+                         color=colours[c], ecolor=colours[c],
+                         alpha=0.8,
+                         label=f"cat={c} (r={r_val:.2f})")
+            plt.plot(mean_x, dod_vals, '-', color=colours[c], alpha=0.7)
+
+        plt.xlabel(fname)
+        plt.ylabel("Observed DoD")
+        plt.title(f"{prefix}: {fname}")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
 
 # ────────────────────────────────────────────────────────────
 #  feature‑matrix helpers  (burn_fraction & burn_cumsum excluded)
@@ -139,8 +176,24 @@ def mlp_unburned_experiment(X, y, cat2d, ok, feat_names,
     unb = cat <= thr
     log(f"  training on unburned (cat ≤ {thr}): N={unb.sum()}")
 
-    X_tr_raw, X_te_raw, y_tr, y_te = train_test_split(
-        Xv[unb], Yv[unb], test_size=0.3, random_state=42)
+    # ── NEW: make a 70 % / 30 % split **inside every training category** ──
+    train_idx, test_idx = [], []
+    for c in range(thr + 1):                        # cats 0 … thr
+        rows = np.where((cat == c) & (cat <= thr))[0]
+        if rows.size == 0:
+            continue
+        tr, te = train_test_split(rows,
+                                test_size=0.30,
+                                random_state=42)
+        train_idx.append(tr)
+        test_idx .append(te)
+
+    train_idx = np.concatenate(train_idx)
+    test_idx  = np.concatenate(test_idx)
+
+    X_tr_raw, y_tr = Xv[train_idx], Yv[train_idx]
+    X_te_raw, y_te = Xv[test_idx ], Yv[test_idx ]
+
 
     # scale (helps MLP converge)
     xsc = StandardScaler()
@@ -191,7 +244,7 @@ def mlp_unburned_experiment(X, y, cat2d, ok, feat_names,
     imp = perm_importance_mlp(mlp, X_all, Yv, n_repeats=3)
     plot_top10_perm_importance(imp, feat_names,
                                f"Top‑10 Permutation Importance (thr={thr})")
-    plot_top5_feat_scatter(imp, Xv, Yv, cat, feat_names,
+    plot_top5_feature_scatter(imp, Xv, Yv, cat, feat_names,
                            f"Top‑5 (thr={thr})")
 
     return mlp
