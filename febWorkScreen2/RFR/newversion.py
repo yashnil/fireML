@@ -304,15 +304,18 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag,
 
     bias       = y_pred - y_true
     elev_bin   = np.digitize(elev, elev_edges) - 1
-    uniq_veg   = np.unique(veg.astype(int))
-    n_veg      = int(uniq_veg.max()) + 1
+
+    # ---- fixed VegTyp columns 1 … 23 ----------------------------------
+    veg_range  = np.arange(1, 24)                # 23 columns
+    n_veg      = len(veg_range)
 
     grid = np.full((len(elev_edges)-1, n_veg), np.nan)
+
     for ei in range(len(elev_edges)-1):
-        for vv in uniq_veg:
+        for vv in veg_range:
             m = (elev_bin == ei) & (veg.astype(int) == vv)
             if m.any():
-                grid[ei, vv] = np.nanmean(bias[m])
+                grid[ei, vv-1] = np.nanmean(bias[m])   # vv-1 because 0-index
 
     plt.figure(figsize=(8,4))
     im = plt.imshow(grid, cmap='seismic', vmin=-60, vmax=60,
@@ -330,7 +333,7 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag,
                 plt.text(j, i, f"{grid[i, j]:.0f}",
                          ha='center', va='center', fontsize=7, color='k')
 
-    plt.xticks(uniq_veg, [f"V{v}" for v in uniq_veg])
+    plt.xticks(range(n_veg), [f"V{v}" for v in veg_range])
     plt.yticks(range(len(elev_edges)-1),
                [f"{elev_edges[i]}–{elev_edges[i+1]}" for i in range(len(elev_edges)-1)])
     plt.colorbar(im, label="Bias (days)")
@@ -569,22 +572,41 @@ def rf_unburned_experiment(
             'r2'  : r2_score(Yv[m], y_hat_all[m])
         }
 
-    col_lines = {0:'black', 1:'blue', 2:'grey', 3:'red'}
-    fig = plt.figure(figsize=(15,4))
-    for j,(key,lab) in enumerate([('bias','Mean Bias'),
-                                ('rmse','RMSE'),
-                                ('r2','R²')],1):
-        ax = fig.add_subplot(1,3,j)
-        for c,col in col_lines.items():
-            ax.hist(metrics[c][key], bins=10, alpha=.45, color=col, label=f"cat{c}")
-            # mean of *robustness* dist
-            ax.axvline(np.mean(metrics[c][key]), color=col, ls='--', lw=2)
-            # mean of *original* full-sample metric
-            ax.axvline(orig_stats[c][key],       color=col, ls='-',  lw=2)
-        ax.set_xlabel(lab); ax.set_title(lab)
-        if j==1: ax.legend()
+    # colours for every category
+    col_distr = {0: 'black', 1: 'blue', 3: 'red'}   # cats shown as histograms
+    col_line  = {2: 'grey'}                         # cats shown *only* as a line
+
+    fig = plt.figure(figsize=(15, 4))
+    for j, (key, lab) in enumerate([('bias', 'Mean Bias'),
+                                    ('rmse', 'RMSE'),
+                                    ('r2',   'R²')], 1):
+        ax = fig.add_subplot(1, 3, j)
+
+        # 1) histograms + their dashed means (cats 0,1,3)
+        for c, col in col_distr.items():
+            ax.hist(metrics[c][key],
+                    bins=10, alpha=.45, color=col, label=f"cat{c}")
+            ax.axvline(np.mean(metrics[c][key]), color=col, ls='--', lw=2)   # dashed
+
+            # solid vertical line = metric on *all* samples of that cat
+            ax.axvline(orig_stats[c][key], color=col, ls='-', lw=2)
+
+        # 2) line-only categories (just cat2 here)
+        for c, col in col_line.items():
+            # mean of robustness runs  (dashed)   ← ADD a label here
+            ax.axvline(np.mean(metrics[c][key]),
+                    color=col, ls='--', lw=2, label=f"cat{c}")
+
+            # mean of original full-sample metric  (solid) – no label to avoid legend dupes
+            ax.axvline(orig_stats[c][key], color=col, ls='-', lw=2)
+
+        ax.set_xlabel(lab)
+        ax.set_title(lab)
+        if j == 1:                     # only put the legend on the middle panel
+            ax.legend()
     fig.suptitle(f"Down-sampling distributions (k={k})")
-    fig.tight_layout(); plt.show()
+    fig.tight_layout()
+    plt.show()
 
     # ── F. feature importance & top‑5 scatter ─────────────────────
     plot_top10_features(rf, feat_names,
