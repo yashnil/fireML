@@ -123,25 +123,33 @@ def dod_map_ca(ds, pix_idx, values, title, cmap="magma", vmin=50, vmax=250):
     plt.colorbar(sc, ax=ax, shrink=0.8, label="DoD (days)")
     plt.tight_layout(); plt.show()
 
-def bias_map_ca(ds, pix_idx, y_true, y_pred, title):
-    n_pix = ds.sizes["pixel"]
-    sum_b = np.zeros(n_pix); cnt = np.zeros(n_pix)
-    for p,res in zip(pix_idx, y_pred-y_true):
+def bias_map_ca(ds,pix_idx,y_true,y_pred,title):
+    """
+    Mean pixel bias with common scale −60…+60 days.
+    Bias values beyond that are clipped; only evaluated pixels plotted.
+    """
+    n_pix=ds.sizes["pixel"]
+    sum_b=np.zeros(n_pix); cnt=np.zeros(n_pix)
+    for p,res in zip(pix_idx,y_pred-y_true):
         sum_b[p]+=res; cnt[p]+=1
-    mean_b = np.full(n_pix,np.nan)
-    valid  = cnt>0
-    mean_b[valid] = sum_b[valid]/cnt[valid]
-    lat = ds["latitude"].values; lon = ds["longitude"].values
-    lat1=lat[0] if lat.ndim==2 else lat; lon1=lon[0] if lon.ndim==2 else lon
-    vmax = np.nanmax(np.abs(mean_b[valid])) if valid.any() else 1e-6
-    vmax = vmax if np.isfinite(vmax) and vmax>0 else 1e-6
-    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
-    ax = _setup_ca_axes(title)
-    ax.scatter(lon1,lat1,c="lightgray",s=4,alpha=0.4,transform=ccrs.PlateCarree())
-    sc = ax.scatter(lon1[valid], lat1[valid], c=mean_b[valid],
-                    cmap="bwr", norm=norm,
-                    s=10, alpha=0.9, transform=ccrs.PlateCarree())
-    plt.colorbar(sc, ax=ax, shrink=0.8, label="Mean Bias (Pred‑Obs)")
+    mean_b=np.full(n_pix,np.nan)
+    mask=cnt>0
+    mean_b[mask]=sum_b[mask]/cnt[mask]
+
+    # clip to ±60 days
+    mean_b=np.clip(mean_b,-60,60)
+
+    lat=ds["latitude"].values; lon=ds["longitude"].values
+    lat1=lat[0] if lat.ndim==2 else lat
+    lon1=lon[0] if lon.ndim==2 else lon
+
+    ax=_setup_ca_axes(title)
+    sc=ax.scatter(lon1[mask],lat1[mask],
+                  c=mean_b[mask],
+                  cmap="seismic",
+                  norm=TwoSlopeNorm(vmin=-60,vcenter=0,vmax=60),
+                  s=10,alpha=0.9,transform=ccrs.PlateCarree())
+    plt.colorbar(sc,ax=ax,shrink=0.8,label="Mean Bias (Pred‑Obs, days)")
     plt.tight_layout(); plt.show()
 
 # ────────────────────────────────────────────────────────────
