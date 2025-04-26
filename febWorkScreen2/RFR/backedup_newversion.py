@@ -4,17 +4,38 @@
 #  70 % unburned‑only training → evaluate everywhere
 #  burn_fraction **excluded** from predictors
 # ============================================================
-import time, xarray as xr, numpy as np, matplotlib.pyplot as plt
+# ─── core libs ───────────────────────────────────────────────
+import time, socket, requests
+import numpy as np
+import numpy.random as npr
+import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 from scipy.stats import ranksums
+import xarray as xr
+
+# ─── scikit-learn ────────────────────────────────────────────
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
-import numpy.random as npr
+
+# ─── geo / plotting ──────────────────────────────────────────
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import contextily as ctx
+import geopandas as gpd
+import xyzservices.providers as xyz
+import cartopy.io.img_tiles as cimgt
+from pathlib import Path
+
 # typing
 from typing import Dict, List, Tuple, Optional
+
+PIX_SZ = 2
+STATES_SHP = "data/cb_2022_us_state_500k/cb_2022_us_state_500k.shp"
+STATES = gpd.read_file(STATES_SHP).to_crs(epsg=3857)
+# ─── California lon/lat rectangle  (PlateCarree) ─────────────
+CA_LON_W, CA_LON_E = -125.0, -117.0   # west, east
+CA_LAT_S, CA_LAT_N =   37.0,   43.0   # south, north
 
 # ────────────────────────────────────────────────────────────
 #  pretty timer
@@ -151,51 +172,112 @@ def _setup_ca_axes(title:str):
     ax.set_title(title)
     return ax
 
+TILER = cimgt.GoogleTiles(style='satellite')   # or StamenTerrain
+TILER.request_timeout = 5
+
+# ------------------------------------------------------------
+# helper: tight Mercator extent around all finite pixels
+# ------------------------------------------------------------
+def dataset_extent_mercator(ds, pad_km=100):        # 100 km is plenty
+    """
+    Return [xmin, ymin, xmax, ymax] in EPSG:3857 that encloses every finite
+    (lon,lat) pair in *ds*, plus pad_km on all sides.  Longitudes that are
+    stored in 0…360° are wrapped to −180…180° first.
+    """
+    lat = ds["latitude"].values.ravel()
+    lon = ds["longitude"].values.ravel()
+
+    finite = np.isfinite(lat) & np.isfinite(lon)
+    if not finite.any():
+        raise RuntimeError("no finite lat/lon values!")
+
+    lon = lon.copy()
+    lon[lon > 180] -= 360                    # wrap 0–360° → −180…180°
+
+    merc = ccrs.epsg(3857)
+    x, y = merc.transform_points(ccrs.Geodetic(),
+                                 lon[finite], lat[finite])[:, :2].T
+
+    pad = pad_km * 1_000                     # km → m
+    # clamp to the legal Web-Mercator range just in case
+    max_wm = 20_037_508.342789244
+    x_min = max(-max_wm, x.min() - pad)
+    x_max = min( max_wm, x.max() + pad)
+    y_min = max(-max_wm, y.min() - pad)
+    y_max = min( max_wm, y.max() + pad)
+    return [x_min, y_min, x_max, y_max]
+
+# call *once* after you open the dataset
+CA_EXTENT = None
+
+def _satellite_available(timeout_s: int = 2) -> bool:
+    """Quick HEAD request; returns True if Esri tiles reachable."""
+    url = "https://services.arcgisonline.com/arcgis/rest/services" \
+          "/World_Imagery/MapServer"
+    try:
+        requests.head(url, timeout=timeout_s)        # no auth, very small
+        return True
+    except (requests.RequestException, socket.error):
+        return False
+
+USE_SAT   = _satellite_available()
+print("[INFO] satellite imagery available:", USE_SAT)
+
+# ------------------------------------------------------------------
+# background painter  (unchanged except that it uses CA_EXTENT)
+# ------------------------------------------------------------------
+
+_RELIEF = cfeature.NaturalEarthFeature(
+            "physical", "shaded_relief", "10m",
+            edgecolor="none", facecolor=cfeature.COLORS["land"])
+
+# --- keep this helper; we still need the extent -----------------
+def add_background(ax, extent_merc, zoom=6):
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
+              crs=ccrs.PlateCarree())
+    try:
+        ax.add_image(TILER, zoom, interpolation="nearest")
+    except Exception as e:
+        print("⚠︎ satellite tiles skipped:", e)
+        ax.add_feature(_RELIEF, zorder=0)   # shaded relief fallback
+    STATES.boundary.plot(ax=ax, linewidth=.6, edgecolor="black", zorder=2)
+
+
+# ------------------------------------------------------------------
+# DoD and Bias maps   (background FIRST, pixels ON TOP)
+# ------------------------------------------------------------------
 def dod_map_ca(ds, pix_idx, values, title,
-               cmap="magma", vmin=50, vmax=250):
-    """Uniform‑scale DoD map (50‑250)."""
-    lat = ds["latitude"].values; lon = ds["longitude"].values
-    lat1 = lat[0] if lat.ndim==2 else lat
-    lon1 = lon[0] if lon.ndim==2 else lon
-    ax=_setup_ca_axes(title)
-    sc=ax.scatter(lon1[pix_idx], lat1[pix_idx],
-                  c=values, cmap=cmap,
-                  vmin=vmin, vmax=vmax,
-                  s=10, alpha=0.9,
-                  transform=ccrs.PlateCarree())
-    plt.colorbar(sc, ax=ax, shrink=0.8, label="DoD (days)")
-    plt.tight_layout(); plt.show()
+               cmap="Blues", vmin=50, vmax=250):
+    merc = ccrs.epsg(3857)
+    lat, lon = ds["latitude"].values.ravel(), ds["longitude"].values.ravel()
+    x, y = merc.transform_points(ccrs.Geodetic(),
+                                 lon[pix_idx], lat[pix_idx])[:, :2].T
+    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6, 5))
+    add_background(ax, CA_EXTENT)                # background tiles
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
+                  crs=ccrs.PlateCarree())        # <- NEW, hard clip
+    sc = ax.scatter(x, y, c=values, cmap=cmap,
+                    vmin=vmin, vmax=vmax,
+                    s=PIX_SZ, marker="s", transform=merc, zorder=3)
+    plt.colorbar(sc, ax=ax, shrink=.8, label="DoD (days)")
+    ax.set_title(title); plt.tight_layout(); plt.show()
 
 def bias_map_ca(ds, pix_idx, y_true, y_pred, title):
-    """
-    Mean‑bias map with *fixed* colour scale −60…+60 days.
-    Values outside this range are clipped.
-    Background pixels removed.
-    """
-    n_pix = ds.sizes["pixel"]
-    sum_b=np.zeros(n_pix); cnt=np.zeros(n_pix)
-    for p,res in zip(pix_idx, y_pred-y_true):
-        sum_b[p]+=res; cnt[p]+=1
-    mean_b=np.full(n_pix,np.nan)
-    valid=cnt>0
-    mean_b[valid]=sum_b[valid]/cnt[valid]
+    merc = ccrs.epsg(3857)
+    lat, lon = ds["latitude"].values.ravel(), ds["longitude"].values.ravel()
+    x, y = merc.transform_points(ccrs.Geodetic(),
+                                 lon[pix_idx], lat[pix_idx])[:, :2].T
+    bias = np.clip(y_pred - y_true, -60, 60)
+    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6, 5))
+    add_background(ax, CA_EXTENT)                           # ← changed
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
+                  crs=ccrs.PlateCarree())        # <- NEW, hard clip
+    sc = ax.scatter(x, y, c=bias, cmap="seismic",
+                    norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
+                    s=PIX_SZ, marker="s", transform=merc, zorder=3)
+    plt.colorbar(sc, ax=ax, shrink=.8, label="Bias (Pred-Obs, days)")
+    ax.set_title(title); plt.tight_layout(); plt.show()
 
-    # clip to ±60
-    mean_b=np.clip(mean_b, -60, 60)
-
-    lat = ds["latitude"].values; lon = ds["longitude"].values
-    lat1=lat[0] if lat.ndim==2 else lat
-    lon1=lon[0] if lon.ndim==2 else lon
-
-    ax=_setup_ca_axes(title)
-    sc=ax.scatter(lon1[valid], lat1[valid],
-                  c=mean_b[valid],
-                  cmap='seismic',           # 0 is light‑grey, stands out
-                  norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
-                  s=10, alpha=0.9,
-                  transform=ccrs.PlateCarree())
-    plt.colorbar(sc, ax=ax, shrink=0.8, label="Mean Bias (Pred‑Obs, days)")
-    plt.tight_layout(); plt.show()
 
 
 def boxplot_dod_by_elev_veg(y, elev, veg, tag):
@@ -216,6 +298,48 @@ def boxplot_dod_by_elev_veg(y, elev, veg, tag):
     plt.title(tag)
     plt.tight_layout()
     plt.show()
+
+def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag,
+                          elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500)):
+
+    bias       = y_pred - y_true
+    elev_bin   = np.digitize(elev, elev_edges) - 1
+
+    # ---- fixed VegTyp columns 1 … 23 ----------------------------------
+    veg_range  = np.arange(1, 24)                # 23 columns
+    n_veg      = len(veg_range)
+
+    grid = np.full((len(elev_edges)-1, n_veg), np.nan)
+
+    for ei in range(len(elev_edges)-1):
+        for vv in veg_range:
+            m = (elev_bin == ei) & (veg.astype(int) == vv)
+            if m.any():
+                grid[ei, vv-1] = np.nanmean(bias[m])   # vv-1 because 0-index
+
+    plt.figure(figsize=(8,4))
+    im = plt.imshow(grid, cmap='seismic', vmin=-60, vmax=60,
+                    origin='lower', aspect='auto')
+
+    # --- black border around every cell ---------------------------
+    for i in range(grid.shape[0]):
+        for j in range(grid.shape[1]):
+            plt.gca().add_patch(
+                plt.Rectangle((j-0.5, i-0.5), 1, 1,
+                              ec='black', fc='none', lw=.6)
+            )
+            # value label
+            if not np.isnan(grid[i, j]):
+                plt.text(j, i, f"{grid[i, j]:.0f}",
+                         ha='center', va='center', fontsize=7, color='k')
+
+    plt.xticks(range(n_veg), [f"V{v}" for v in veg_range])
+    plt.yticks(range(len(elev_edges)-1),
+               [f"{elev_edges[i]}–{elev_edges[i+1]}" for i in range(len(elev_edges)-1)])
+    plt.colorbar(im, label="Bias (days)")
+    plt.title(tag)
+    plt.tight_layout();  plt.show()
+
 
 
 # ────────────────────────────────────────────────────────────
@@ -365,14 +489,14 @@ def rf_unburned_experiment(
             pix_valid[m],
             Yv[m],
             f"Observed DoD – cat {c} (thr={thr})",
-            cmap="magma",
+            cmap="Blues",
         )
         dod_map_ca(
             ds,
             pix_valid[m],
             y_hat_all[m],
             f"Predicted DoD – cat {c} (thr={thr})",
-            cmap="magma",
+            cmap="Blues",
         )
 
         # per‑category pixel‑bias map
@@ -390,6 +514,9 @@ def rf_unburned_experiment(
         boxplot_dod_by_elev_veg(
             Yv[m], elev, veg, f"cat={c}, thr={thr}"
         )
+
+        heat_bias_by_elev_veg(Yv[m], y_hat_all[m], elev, veg,
+                      f"Elev×Veg Bias – cat {c} (thr={thr})")
 
     if 0 in bias_by_cat:
         print("\nWilcoxon rank‑sum (bias difference vs cat 0)")
@@ -435,22 +562,51 @@ def rf_unburned_experiment(
             metrics[c]['r2'  ].append(r2_score(y_s, yhat))
 
     # ── merged histogram figure ───────────────────────────────
-    colours = {0:'red', 1:'yellow', 3:'blue'}    # c2 is reference (grey line)
-    fig = plt.figure(figsize=(15,4))
-    for j, key, lab in zip([1,2,3], ['bias','rmse','r2'],
-                           ['Mean Bias','RMSE','R²']):
-        ax = fig.add_subplot(1,3,j)
-        for c,col in colours.items():
-            ax.hist(metrics[c][key], bins=10, color=col,
-                    alpha=0.45, label=f"cat{c}")
-        # reference class vertical line
-        ref_val = np.mean(metrics[ref_cat][key])
-        ax.axvline(ref_val, color='grey', ls='--', lw=2,
-                   label=f"cat{ref_cat} mean")
-        ax.set_title(lab);  ax.set_xlabel(lab);  ax.set_ylabel("count")
-        if j==1:  ax.legend()
-    fig.suptitle(f"Down‑sampling distributions (k={k})")
-    fig.tight_layout();  plt.show()
+    
+    orig_stats = {}
+    for c in counts:
+        m = cat == c
+        orig_stats[c] = {
+            'bias': (y_hat_all[m] - Yv[m]).mean(),
+            'rmse': np.sqrt(mean_squared_error(Yv[m], y_hat_all[m])),
+            'r2'  : r2_score(Yv[m], y_hat_all[m])
+        }
+
+    # colours for every category
+    col_distr = {0: 'black', 1: 'blue', 3: 'red'}   # cats shown as histograms
+    col_line  = {2: 'grey'}                         # cats shown *only* as a line
+
+    fig = plt.figure(figsize=(15, 4))
+    for j, (key, lab) in enumerate([('bias', 'Mean Bias'),
+                                    ('rmse', 'RMSE'),
+                                    ('r2',   'R²')], 1):
+        ax = fig.add_subplot(1, 3, j)
+
+        # 1) histograms + their dashed means (cats 0,1,3)
+        for c, col in col_distr.items():
+            ax.hist(metrics[c][key],
+                    bins=10, alpha=.45, color=col, label=f"cat{c}")
+            ax.axvline(np.mean(metrics[c][key]), color=col, ls='--', lw=2)   # dashed
+
+            # solid vertical line = metric on *all* samples of that cat
+            ax.axvline(orig_stats[c][key], color=col, ls='-', lw=2)
+
+        # 2) line-only categories (just cat2 here)
+        for c, col in col_line.items():
+            # mean of robustness runs  (dashed)   ← ADD a label here
+            ax.axvline(np.mean(metrics[c][key]),
+                    color=col, ls='--', lw=2, label=f"cat{c}")
+
+            # mean of original full-sample metric  (solid) – no label to avoid legend dupes
+            ax.axvline(orig_stats[c][key], color=col, ls='-', lw=2)
+
+        ax.set_xlabel(lab)
+        ax.set_title(lab)
+        if j == 1:                     # only put the legend on the middle panel
+            ax.legend()
+    fig.suptitle(f"Down-sampling distributions (k={k})")
+    fig.tight_layout()
+    plt.show()
 
     # ── F. feature importance & top‑5 scatter ─────────────────────
     plot_top10_features(rf, feat_names,
@@ -466,6 +622,12 @@ def rf_unburned_experiment(
 if __name__ == "__main__":
     log("loading final_dataset4.nc …")
     ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset4.nc")
+    # ---- fixed mercator extent that encloses the CA rectangle ----
+    merc   = ccrs.epsg(3857)
+    x0, y0 = merc.transform_point(CA_LON_W, CA_LAT_S, ccrs.PlateCarree())
+    x1, y1 = merc.transform_point(CA_LON_E, CA_LAT_N, ccrs.PlateCarree())
+    CA_EXTENT = [x0, y0, x1, y1]          # will be used by add_background()
+    print("[DEBUG] CA extent:", CA_EXTENT)      # should be ~ −1.4e7 … −1.25e7 etc.
 
     # cumulative‑burn categories already stored as burn_cumsum
     bc = ds["burn_cumsum"].values  # (year, pixel)

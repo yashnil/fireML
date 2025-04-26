@@ -162,6 +162,77 @@ def plot_top5_feature_scatter(rf, X, y, cat, names, prefix):
 #  replace the old `plot_top5_feature_scatter()` with the new one
 #  above, keep everything else unchanged.)
 
+# ------------------------------------------------------------
+# NEW  :  Top-5 feature scatter – 20 feature bins on the x-axis
+# ------------------------------------------------------------
+def plot_top5_feature_scatter_binned(
+        rf: RandomForestRegressor,
+        X: np.ndarray,
+        y: np.ndarray,
+        cat: np.ndarray,
+        names: List[str],
+        prefix: str,
+        n_bins: int = 20):
+    """
+    Same colour/legend convention as the original scatter.
+    • divide the feature range into *n_bins* equal-width bins
+    • for every bin & every category:
+        – x = bin centre
+        – y = mean(DOD) of points in that bin & category
+        – vertical bar = ±1 SD(DOD)
+    • connect the 20 points of each category with a line.
+    """
+    imp  = rf.feature_importances_
+    top5 = np.argsort(imp)[::-1][:5]
+    colours = {0: 'red', 1: 'yellow', 2: 'green', 3: 'blue'}
+    cats    = [0, 1, 2, 3]
+
+    for f_idx in top5:
+        fname = names[f_idx]
+        x_all = X[:, f_idx]
+
+        # fixed bin edges & centres (equal width)
+        edges   = np.linspace(x_all.min(), x_all.max(), n_bins + 1)
+        centres = 0.5 * (edges[:-1] + edges[1:])
+
+        plt.figure(figsize=(7, 5))
+        for c in cats:
+            mask_c = (cat == c)
+            if not mask_c.any():
+                continue
+
+            # corr for the legend
+            r_val = np.corrcoef(x_all[mask_c], y[mask_c])[0, 1]
+
+            y_mean, y_sd, x_valid = [], [], []
+            for i in range(n_bins):
+                m_bin = mask_c & (x_all >= edges[i]) & (x_all < edges[i + 1])
+                if not m_bin.any():
+                    continue
+                y_mean.append(y[m_bin].mean())
+                y_sd  .append(y[m_bin].std(ddof=0))
+                x_valid.append(centres[i])
+
+            if not x_valid:    # nothing fell into any bin
+                continue
+
+            y_mean = np.array(y_mean)
+            y_sd   = np.array(y_sd)
+            x_valid= np.array(x_valid)
+
+            plt.errorbar(x_valid, y_mean,
+                         yerr=y_sd,
+                         fmt='o', ms=4, lw=1,
+                         color=colours[c], ecolor=colours[c],
+                         alpha=0.8,
+                         label=f"cat={c} (r={r_val:.2f})")
+            plt.plot(x_valid, y_mean, '-', color=colours[c], alpha=0.7)
+
+        plt.xlabel(fname)
+        plt.ylabel("Observed DoD")
+        plt.title(f"{prefix} (binned): {fname}")
+        plt.legend()
+        plt.tight_layout(); plt.show()
 
 # ── refined spatial helpers ─────────────────────────────────────────
 def _setup_ca_axes(title:str):
@@ -609,10 +680,14 @@ def rf_unburned_experiment(
     plt.show()
 
     # ── F. feature importance & top‑5 scatter ─────────────────────
+    # --- F. feature importance & both Top-5 scatter variants --------
     plot_top10_features(rf, feat_names,
-                        f"Top‑10 Feature Importance (thr={unburned_max_cat})")
-    plot_top5_feature_scatter(rf, Xv, Yv, cat, feat_names,
-                              f"Top‑5 (thr={unburned_max_cat})")
+                        f"Top-10 Feature Importance (thr={unburned_max_cat})")
+    plot_top5_feature_scatter(       rf, Xv, Yv, cat, feat_names,
+                        f"Top-5 thr={unburned_max_cat}")
+    plot_top5_feature_scatter_binned(rf, Xv, Yv, cat, feat_names,
+                        f"Top-5 thr={unburned_max_cat}")
+
     return rf
 
 
