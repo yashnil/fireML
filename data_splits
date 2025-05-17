@@ -1,0 +1,39 @@
+digraph splits {
+	nodesep=0.4 rankdir=LR ranksep=0.6
+	subgraph cluster_1 {
+		label="70 % c0 → test on all cats" style=rounded
+		data1 [label="Data
+(c0–c3)" fillcolor="#dddddd" shape=box style=filled]
+		train1 [label="70 % train" shape=box]
+		model1 [label="Model
+(BF —)" shape=ellipse]
+		test1 [label="30 % test" shape=box]
+		data1 -> train1
+		train1 -> model1
+		model1 -> test1
+	}
+	subgraph cluster_2 {
+		label="70 % all cats (BF out)" style=rounded
+		data2 [label="Data
+(c0–c3)" fillcolor="#dddddd" shape=box style=filled]
+		train2 [label="70 % train" shape=box]
+		model2 [label="Model
+(BF ❌)" shape=ellipse]
+		test2 [label="30 % test" shape=box]
+		data2 -> train2
+		train2 -> model2
+		model2 -> test2
+	}
+	subgraph cluster_3 {
+		label="70 % all cats (BF in)" style=rounded
+		data3 [label="Data
+(c0–c3)" fillcolor="#dddddd" shape=box style=filled]
+		train3 [label="70 % train" shape=box]
+		model3 [label="Model
+(BF ✅)" shape=ellipse]
+		test3 [label="30 % test" shape=box]
+		data3 -> train3
+		train3 -> model3
+		model3 -> test3
+	}
+}

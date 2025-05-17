@@ -234,6 +234,67 @@ def plot_top5_feature_scatter_binned(
         plt.legend()
         plt.tight_layout(); plt.show()
 
+# ------------------------------------------------------------------
+# EXTRA DIAGNOSTIC PLOTS  (box-plots & histograms)
+# ------------------------------------------------------------------
+def boxplot_dod_by_cat(y_obs, y_pred, cat, title_prefix, fname_base=None):
+    """Two side-by-side box-plots: observed & predicted DOD per category."""
+    cats = [0, 1, 2, 3]
+    data_obs = [y_obs[cat == c] for c in cats]
+    data_pred = [y_pred[cat == c] for c in cats]
+
+    fig, axs = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+    axs[0].boxplot(data_obs, showmeans=True)
+    axs[0].set_title(f"{title_prefix} – OBSERVED")
+    axs[1].boxplot(data_pred, showmeans=True)
+    axs[1].set_title(f"{title_prefix} – PREDICTED")
+    for ax in axs:
+        ax.set_xticklabels([f"c{c}" for c in cats]);  ax.set_xlabel("Category")
+    axs[0].set_ylabel("DoD (days)")
+    fig.tight_layout()
+    if fname_base:
+        fig.savefig(f"{fname_base}.png", dpi=300)
+    plt.show()
+
+
+def boxplot_top5_predictors(X, feat_names, cat, rf, prefix, fname_base=None):
+    """For each of the RF top-5 features make a one-panel box-plot per cat."""
+    idx = np.argsort(rf.feature_importances_)[::-1][:5]
+    cats = [0, 1, 2, 3]
+    for i in idx:
+        data = [X[cat == c, i] for c in cats]
+        plt.figure(figsize=(5, 3.5))
+        plt.boxplot(data, showmeans=True)
+        plt.xticks(range(1, 5), [f"c{c}" for c in cats])
+        plt.ylabel(feat_names[i])
+        plt.title(f"{prefix}: {feat_names[i]}")
+        plt.tight_layout()
+        if fname_base:
+            plt.savefig(f"{fname_base}_{feat_names[i]}.png", dpi=300)
+        plt.show()
+
+
+def transparent_histogram_by_cat(values, cat, title, alpha=0.35,
+                                 colors={0:'red',1:'yellow',2:'green',3:'blue'},
+                                 fname=None):
+    """Overlaid semi-transparent histograms by category (same bin range)."""
+    plt.figure(figsize=(6,4))
+    rng = (np.nanmin(values), np.nanmax(values))
+    bins = 40
+    for c, col in colors.items():
+        sel = cat == c
+        if sel.any():
+            plt.hist(values[sel], bins=bins, range=rng,
+                     alpha=alpha, color=col, label=f"c{c}", density=True)
+    plt.xlabel("DoD (days)")
+    plt.ylabel("relative freq.")
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    if fname:
+        plt.savefig(fname, dpi=300)
+    plt.show()
+
 # ── refined spatial helpers ─────────────────────────────────────────
 def _setup_ca_axes(title:str):
     ax=plt.axes(projection=ccrs.PlateCarree())
@@ -495,14 +556,21 @@ def rf_unburned_experiment(
         tr, te = train_test_split(rows,
                                 test_size = 0.30,
                                 random_state = 42)
+        
+        # print the size of the datasets
+        print(tr.size)
+        print(te.size)
+        
         train_idx.append(tr)
         test_idx .append(te)
 
     train_idx = np.concatenate(train_idx)
     test_idx  = np.concatenate(test_idx)
+    cat_te = cat[test_idx]
 
     X_tr, y_tr = Xv[train_idx], Yv[train_idx]      # **train** = 70 % of allowed cats
     X_te, y_te = Xv[test_idx ], Yv[test_idx ]      # **internal test** = 30 % of same
+
 
     # ──────── Changed Part ────────
 
@@ -514,11 +582,42 @@ def rf_unburned_experiment(
     plot_bias_hist(y_tr, rf.predict(X_tr), f"Bias Hist: Unburned TRAIN (cat ≤ {thr})")
 
     y_hat_te = rf.predict(X_te)
+
+    # --- NEW test-set box-plots & histograms -------------------------------
+    boxplot_dod_by_cat(y_te, y_hat_te, cat_te,
+                    title_prefix="TEST 30 %")
+
+    transparent_histogram_by_cat(y_te,     cat_te,
+                                "Observed DoD – TEST 30 %",
+                                fname=None)
+    transparent_histogram_by_cat(y_hat_te, cat_te,
+                                "Predicted DoD – TEST 30 %",
+                                fname=None)
+
+    # box-plots for RF top-5 predictors (full sample, but you could
+    # do the same on X_te by passing X_te instead of Xv)
+    boxplot_top5_predictors(Xv, feat_names, cat,
+                            rf, prefix="Top-5 predictors")
+
+
     plot_scatter(y_te, y_hat_te, f"Unburned TEST (cat ≤ {thr})")
     plot_bias_hist(y_te, y_hat_te, f"Bias Hist: Unburned TEST (cat ≤ {thr})")
 
     # ── B. evaluate on all valid samples ──────────────────────
     y_hat_all = rf.predict(Xv)
+
+    # --- NEW global box-plots & histograms ---------------------------------
+    boxplot_dod_by_cat(Yv, y_hat_all, cat,
+                    title_prefix="FULL SAMPLE")
+
+    # transparent full-sample observed / predicted histograms
+    transparent_histogram_by_cat(Yv,        cat,
+                                "Observed DoD – FULL sample",
+                                fname=None)
+    transparent_histogram_by_cat(y_hat_all, cat,
+                                "Predicted DoD – FULL sample",
+                                fname=None)
+
 
     plot_scatter_by_cat(
         Yv, y_hat_all, cat, f"All data – colour by cat (thr={thr})"
