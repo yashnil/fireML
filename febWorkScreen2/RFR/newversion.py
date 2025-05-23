@@ -786,6 +786,22 @@ def rf_unburned_experiment(
                         f"Top-5 thr={unburned_max_cat}")
     plot_top5_feature_scatter_binned(rf, Xv, Yv, cat, feat_names,
                         f"Top-5 thr={unburned_max_cat}")
+    
+    # ── G. Wilcoxon tests on top-5 predictor distributions ─────────────────
+    from scipy.stats import ranksums
+
+    # get the top‐5 feature indices
+    top5_idx = np.argsort(rf.feature_importances_)[::-1][:5]
+    print("\nWilcoxon rank‐sum tests for top‐5 features (c1,c2,c3 vs c0):")
+    for f in top5_idx:
+        fname = feat_names[f]
+        data0 = Xv[cat == 0, f]
+        for c in (1, 2, 3):
+            datac = Xv[cat == c, f]
+            if datac.size == 0:
+                continue
+            stat, p = ranksums(data0, datac)
+            print(f"  {fname}: cat{c} vs cat0 → statistic={stat:.3f}, p={p:.3e}")
 
     return rf
 
