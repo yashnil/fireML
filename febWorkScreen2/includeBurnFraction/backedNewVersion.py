@@ -445,6 +445,7 @@ def rf_experiment_nobf(X,y,cat2d,ok,ds,feat_names):
 
     # --- Test (all categories)
     yhat_te = rf.predict(X_te)
+    y_hat_all = rf.predict(Xv) 
     # --- NEW test-set box-plots & histograms --------------------------
     boxplot_dod_by_cat(y_te, yhat_te, cat_te,
                     title_prefix="TEST 30 %")
@@ -456,6 +457,15 @@ def rf_experiment_nobf(X,y,cat2d,ok,ds,feat_names):
     # want the 30 % split)
     boxplot_top5_predictors(Xv, feat_names, cat, rf,
                             prefix="Top-5 predictors")
+    
+    # --- NEW full-sample box-plots & histograms ------------------------
+    boxplot_dod_by_cat(Yv, y_hat_all, cat,
+                    title_prefix="FULL SAMPLE")
+
+    transparent_histogram_by_cat(Yv,        cat,
+                                "Observed DoD – FULL sample")
+    transparent_histogram_by_cat(y_hat_all, cat,
+                                "Predicted DoD – FULL sample")
 
     plot_scatter(y_te, yhat_te, "Test (30 %)")
     plot_bias_hist(y_te, yhat_te, "Bias Hist: Test")

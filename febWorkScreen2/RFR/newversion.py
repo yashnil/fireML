@@ -788,7 +788,6 @@ def rf_unburned_experiment(
                         f"Top-5 thr={unburned_max_cat}")
     
     # ── G. Wilcoxon tests on top-5 predictor distributions ─────────────────
-    from scipy.stats import ranksums
 
     # get the top‐5 feature indices
     top5_idx = np.argsort(rf.feature_importances_)[::-1][:5]
