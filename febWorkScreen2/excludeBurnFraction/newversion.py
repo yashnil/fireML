@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # ============================================================
-#  Fire‑ML evaluation on final_dataset4.nc
+#  Fire-ML evaluation on final_dataset4.nc
 #  (burn_fraction *excluded* from predictors)
-#  70 %/30 % category‑split, whisker plots + uniform‑scale maps
+#  70 %/30 % category-split, whisker plots + uniform-scale maps
 # ============================================================
 import time, xarray as xr, numpy as np, matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
-from scipy.stats import ranksums
+from scipy.stats import ranksums, spearmanr
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
@@ -27,6 +27,12 @@ def log(msg: str) -> None:
     print(f"[{time.time()-T0:7.1f}s] {msg}", flush=True)
 
 # ────────────────────────────────────────────────────────────
+#  Global veg‐type range (will be set once we know which veg types occur)
+# ────────────────────────────────────────────────────────────
+GLOBAL_VEGRANGE: np.ndarray = np.array([], dtype=int)
+
+
+# ────────────────────────────────────────────────────────────
 #  1) Generic plotting helpers
 # ────────────────────────────────────────────────────────────
 def plot_scatter(y_true, y_pred, title):
@@ -37,7 +43,7 @@ def plot_scatter(y_true, y_pred, title):
     rmse = np.sqrt(mean_squared_error(y_true,y_pred))
     bias = (y_pred-y_true).mean(); r2 = r2_score(y_true,y_pred)
     plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DoD"); plt.ylabel("Observed DoD"); plt.legend()
+    plt.xlabel("Predicted DSD"); plt.ylabel("Observed DSD"); plt.legend()
     plt.tight_layout(); plt.show()
 
 def plot_bias_hist(y_true, y_pred, title, rng=(-100,100)):
@@ -46,7 +52,7 @@ def plot_bias_hist(y_true, y_pred, title, rng=(-100,100)):
     plt.hist(res, bins=50, range=rng, alpha=0.7)
     plt.axvline(res.mean(), color='k', ls='--', lw=2)
     plt.title(f"{title}\nMean={res.mean():.2f}, Std={res.std():.2f}")
-    plt.xlabel("Bias (Pred‑Obs)"); plt.ylabel("Count")
+    plt.xlabel("Bias (Pred-Obs)"); plt.ylabel("Count")
     plt.tight_layout(); plt.show()
 
 def plot_scatter_by_cat(y_true, y_pred, cat, title):
@@ -61,7 +67,7 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title):
     rmse = np.sqrt(mean_squared_error(y_true,y_pred))
     bias = (y_pred-y_true).mean(); r2 = r2_score(y_true,y_pred)
     plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DoD"); plt.ylabel("Observed DoD"); plt.legend()
+    plt.xlabel("Predicted DSD"); plt.ylabel("Observed DSD"); plt.legend()
     plt.tight_layout(); plt.show()
 
 def plot_top10_features(rf, names, title):
@@ -72,8 +78,9 @@ def plot_top10_features(rf, names, title):
     plt.xticks(range(10), [names[i] for i in idx], rotation=45, ha='right')
     plt.title(title); plt.ylabel("Feature Importance"); plt.tight_layout(); plt.show()
 
+
 # ────────────────────────────────────────────────────────────
-#  2) Aggregated Top‑5 whisker scatter
+#  2) Aggregated Top-5 whisker scatter
 # ────────────────────────────────────────────────────────────
 def plot_top5_feature_scatter(rf, X, y, cat, names, prefix):
     imp  = rf.feature_importances_
@@ -85,6 +92,7 @@ def plot_top5_feature_scatter(rf, X, y, cat, names, prefix):
         for c,col in cols.items():
             m_c = cat==c
             if not m_c.any(): continue
+            # still showing Pearson here; if you only want Spearman, swap similarly
             r_val = np.corrcoef(feat[m_c], y[m_c])[0,1]
             dod, mean_x, sd_x = [], [], []
             for d in np.unique(y[m_c]):
@@ -102,7 +110,7 @@ def plot_top5_feature_scatter(rf, X, y, cat, names, prefix):
                          color=col, ecolor=col, alpha=0.8,
                          label=f"cat={c} (r={r_val:.2f})")
             plt.plot(mean_x, dod, '-', color=col, alpha=0.7)
-        plt.xlabel(fname); plt.ylabel("Observed DoD")
+        plt.xlabel(fname); plt.ylabel("Observed DSD")
         plt.title(f"{prefix}: {fname}"); plt.legend(); plt.tight_layout(); plt.show()
 
 
@@ -115,13 +123,11 @@ def plot_top5_feature_scatter_binned(
         prefix: str,
         n_bins: int = 20):
     """
-    Same colour/legend convention as the original scatter.
-    • divide the feature range into *n_bins* equal-width bins
-    • for every bin & every category:
-        – x = bin centre
-        – y = mean(DOD) of points in that bin & category
-        – vertical bar = ±1 SD(DOD)
-    • connect the 20 points of each category with a line.
+    Same colour/legend convention as the original scatter, but
+    uses Spearman ρ + p-value in the legend.
+    • divide each feature into *n_bins* equal-width bins
+    • for each bin & category: compute mean(DoD) ±1 SD(DoD)
+    • connect as a line; legend shows Spearman ρ and p-value
     """
     imp  = rf.feature_importances_
     top5 = np.argsort(imp)[::-1][:5]
@@ -131,8 +137,6 @@ def plot_top5_feature_scatter_binned(
     for f_idx in top5:
         fname = names[f_idx]
         x_all = X[:, f_idx]
-
-        # fixed bin edges & centres (equal width)
         edges   = np.linspace(x_all.min(), x_all.max(), n_bins + 1)
         centres = 0.5 * (edges[:-1] + edges[1:])
 
@@ -142,8 +146,8 @@ def plot_top5_feature_scatter_binned(
             if not mask_c.any():
                 continue
 
-            # corr for the legend
-            r_val = np.corrcoef(x_all[mask_c], y[mask_c])[0, 1]
+            # Spearman rho + p-value
+            rho, pval = spearmanr(x_all[mask_c], y[mask_c])
 
             y_mean, y_sd, x_valid = [], [], []
             for i in range(n_bins):
@@ -154,33 +158,32 @@ def plot_top5_feature_scatter_binned(
                 y_sd  .append(y[m_bin].std(ddof=0))
                 x_valid.append(centres[i])
 
-            if not x_valid:    # nothing fell into any bin
+            if not x_valid:
                 continue
 
-            y_mean = np.array(y_mean)
-            y_sd   = np.array(y_sd)
-            x_valid= np.array(x_valid)
+            x_valid = np.array(x_valid)
+            y_mean  = np.array(y_mean)
+            y_sd    = np.array(y_sd)
 
             plt.errorbar(x_valid, y_mean,
                          yerr=y_sd,
                          fmt='o', ms=4, lw=1,
                          color=colours[c], ecolor=colours[c],
                          alpha=0.8,
-                         label=f"cat={c} (r={r_val:.2f})")
+                         label=f"cat={c} (ρ={rho:.2f}, p={pval:.2g})")
             plt.plot(x_valid, y_mean, '-', color=colours[c], alpha=0.7)
 
         plt.xlabel(fname)
-        plt.ylabel("Observed DoD")
+        plt.ylabel("Observed DSD")
         plt.title(f"{prefix} (binned): {fname}")
         plt.legend()
         plt.tight_layout(); plt.show()
 
 
-# ------------------------------------------------------------------
-# EXTRA DIAGNOSTIC PLOTS  (box-plots & histograms)
-# ------------------------------------------------------------------
+# ────────────────────────────────────────────────────────────
+# 3) Extra diagnostic plots (box-plots & histograms)
+# ────────────────────────────────────────────────────────────
 def boxplot_dod_by_cat(y_obs, y_pred, cat, title_prefix, fname_base=None):
-    """Two side-by-side box-plots: observed & predicted DOD per category."""
     cats = [0, 1, 2, 3]
     data_obs = [y_obs[cat == c] for c in cats]
     data_pred = [y_pred[cat == c] for c in cats]
@@ -192,7 +195,7 @@ def boxplot_dod_by_cat(y_obs, y_pred, cat, title_prefix, fname_base=None):
     axs[1].set_title(f"{title_prefix} – PREDICTED")
     for ax in axs:
         ax.set_xticklabels([f"c{c}" for c in cats]);  ax.set_xlabel("Category")
-    axs[0].set_ylabel("DoD (days)")
+    axs[0].set_ylabel("DSD (days)")
     fig.tight_layout()
     if fname_base:
         fig.savefig(f"{fname_base}.png", dpi=300)
@@ -200,7 +203,6 @@ def boxplot_dod_by_cat(y_obs, y_pred, cat, title_prefix, fname_base=None):
 
 
 def boxplot_top5_predictors(X, feat_names, cat, rf, prefix, fname_base=None):
-    """For each of the RF top-5 features make a one-panel box-plot per cat."""
     idx = np.argsort(rf.feature_importances_)[::-1][:5]
     cats = [0, 1, 2, 3]
     for i in idx:
@@ -219,7 +221,6 @@ def boxplot_top5_predictors(X, feat_names, cat, rf, prefix, fname_base=None):
 def transparent_histogram_by_cat(values, cat, title, alpha=0.35,
                                  colors={0:'red',1:'yellow',2:'green',3:'blue'},
                                  fname=None):
-    """Overlaid semi-transparent histograms by category (same bin range)."""
     plt.figure(figsize=(6,4))
     rng = (np.nanmin(values), np.nanmax(values))
     bins = 40
@@ -228,7 +229,7 @@ def transparent_histogram_by_cat(values, cat, title, alpha=0.35,
         if sel.any():
             plt.hist(values[sel], bins=bins, range=rng,
                      alpha=alpha, color=col, label=f"c{c}", density=True)
-    plt.xlabel("DoD (days)")
+    plt.xlabel("DSD (days)")
     plt.ylabel("relative freq.")
     plt.title(title)
     plt.legend()
@@ -239,16 +240,15 @@ def transparent_histogram_by_cat(values, cat, title, alpha=0.35,
 
 
 # ────────────────────────────────────────────────────────────
-#  3) Spatial helpers
+# 4) Spatial helpers
 # ────────────────────────────────────────────────────────────
-
-# ── satellite base-map (falls back to NE shaded relief if offline) ──
-TILER = cimgt.GoogleTiles(style='satellite')      # or StamenTerrain
+TILER = cimgt.GoogleTiles(style='satellite')
 TILER.request_timeout = 5
 
 _RELIEF = cfeature.NaturalEarthFeature(
-            "physical", "shaded_relief", "10m",
-            edgecolor="none", facecolor=cfeature.COLORS["land"])
+    "physical", "shaded_relief", "10m",
+    edgecolor="none", facecolor=cfeature.COLORS["land"]
+)
 
 def _satellite_available(timeout_s: int = 2) -> bool:
     url = ("https://services.arcgisonline.com/arcgis/rest/services/"
@@ -262,7 +262,7 @@ def _satellite_available(timeout_s: int = 2) -> bool:
 USE_SAT = _satellite_available()
 print("[INFO] satellite tiles available:", USE_SAT)
 
-# ── one-time Web-Mercator extent (needed by cartopy) ────────────────
+# one-time Web-Mercator extent
 merc   = ccrs.epsg(3857)
 x0, y0 = merc.transform_point(CA_LON_W, CA_LAT_S, ccrs.PlateCarree())
 x1, y1 = merc.transform_point(CA_LON_E, CA_LAT_N, ccrs.PlateCarree())
@@ -270,8 +270,8 @@ CA_EXTENT = [x0, y0, x1, y1]
 
 def _add_background(ax, zoom=6):
     """
-    Adds a satellite (or shaded-relief fallback) background plus state
-    borders.  The caller is expected to have set the map extent already.
+    Adds a satellite (or shaded-relief fallback) background plus state borders.
+    The caller must set map extent beforehand.
     """
     if USE_SAT:
         try:
@@ -282,62 +282,101 @@ def _add_background(ax, zoom=6):
     else:
         ax.add_feature(_RELIEF, zorder=0)
 
-    # state borders (Natural Earth in EPSG:4326)
+    # state borders
     states_shp = "data/cb_2022_us_state_500k/cb_2022_us_state_500k.shp"
     _states = gpd.read_file(states_shp).to_crs(epsg=4326)
-    _states.boundary.plot(ax=ax, linewidth=.6, edgecolor="black",
-                          zorder=2, transform=ccrs.PlateCarree())
-
-def _setup_ca_axes(title:str):
-    ax = plt.axes(projection=ccrs.PlateCarree())
-    ax.set_extent([-125,-113,32,42], crs=ccrs.PlateCarree())
-    ax.add_feature(cfeature.STATES, linewidth=0.6)
-    ax.coastlines(resolution="10m", linewidth=0.5)
-    ax.set_title(title)
-    return ax
+    _states.boundary.plot(
+        ax=ax,
+        linewidth=0.6,
+        edgecolor="black",
+        zorder=2,
+        transform=ccrs.PlateCarree()
+    )
 
 def dod_map_ca(ds, pix_idx, values, title,
                cmap="Blues", vmin=50, vmax=250):
-    """Light-blue → dark-blue DoD map with common 50…250 day scale."""
+    """
+    Light-blue → dark-blue DSD map on a common 50…250 day scale.
+    """
     merc = ccrs.epsg(3857)
     lat = ds["latitude"].values.ravel(); lon = ds["longitude"].values.ravel()
     x, y = merc.transform_points(ccrs.Geodetic(),
                                  lon[pix_idx], lat[pix_idx])[:, :2].T
-    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6, 5))
+    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
     _add_background(ax, zoom=6)
-    ax.set_extent([CA_LON_W, CA_LON_E,      # ← final hard clip
-                    CA_LAT_S, CA_LAT_N],
-                   crs=ccrs.PlateCarree())
-    sc = ax.scatter(x, y, c=values, cmap=cmap,
-                vmin=vmin, vmax=vmax,
-                s=PIX_SZ, marker="s", transform=merc, zorder=3)
-    plt.colorbar(sc, ax=ax, shrink=.8, label="DoD (days)")
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
+                  crs=ccrs.PlateCarree())
+    sc = ax.scatter(
+        x, y, c=values, cmap=cmap,
+        vmin=vmin, vmax=vmax,
+        s=PIX_SZ, marker="s", transform=merc, zorder=3
+    )
+    plt.colorbar(sc, ax=ax, shrink=0.8, label="DSD (days)")
     ax.set_title(title); plt.tight_layout(); plt.show()
-
 
 def bias_map_ca(ds, pix_idx, y_true, y_pred, title):
     """
-    Per-pixel mean bias with a fixed ±60 day diverging colour-bar,
-    overlaid on the same background.
+    Per-pixel bias (Pred − Obs) clipped to ±60 days, with blue=positive, red=negative.
     """
     merc = ccrs.epsg(3857)
-    bias = np.clip(y_pred - y_true, -60, 60)
     lat = ds["latitude"].values.ravel(); lon = ds["longitude"].values.ravel()
     x, y = merc.transform_points(ccrs.Geodetic(),
                                  lon[pix_idx], lat[pix_idx])[:, :2].T
-    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6, 5))
+    bias = np.clip(y_pred - y_true, -60, 60)
+    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
     _add_background(ax, zoom=6)
-    ax.set_extent([CA_LON_W, CA_LON_E,      # ← final hard clip
-                    CA_LAT_S, CA_LAT_N],
-                   crs=ccrs.PlateCarree())
-    sc = ax.scatter(x, y, c=bias, cmap="seismic",
-                norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
-                s=PIX_SZ, marker="s", transform=merc, zorder=3)
-    plt.colorbar(sc, ax=ax, shrink=.8, label="Bias (Pred-Obs, days)")
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
+                  crs=ccrs.PlateCarree())
+    sc = ax.scatter(
+        x, y, c=bias, cmap="seismic_r",
+        norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
+        s=PIX_SZ, marker="s", transform=merc, zorder=3
+    )
+    plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Pred-Obs, days)")
     ax.set_title(title); plt.tight_layout(); plt.show()
 
+def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag,
+                          elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500)):
+    """
+    Elev×VegTyp grid of mean bias (Pred − Obs), clipped to ±60 days.
+    Only VegTyp columns that occur anywhere in the data are shown.
+    """
+    bias      = y_pred - y_true
+    elev_bin  = np.digitize(elev, elev_edges) - 1
+    veg_range = GLOBAL_VEGRANGE               # only real veg types
+    n_veg     = len(veg_range)
+
+    grid = np.full((len(elev_edges)-1, n_veg), np.nan)
+    for ei in range(len(elev_edges)-1):
+        for j, vv in enumerate(veg_range):
+            sel = (elev_bin == ei) & (veg.astype(int) == vv)
+            if sel.any():
+                grid[ei, j] = np.nanmean(bias[sel])
+
+    plt.figure(figsize=(8,4))
+    im = plt.imshow(
+        grid, cmap='seismic_r', vmin=-60, vmax=60,
+        origin='lower', aspect='auto'
+    )
+    for i in range(grid.shape[0]):
+        for j in range(grid.shape[1]):
+            plt.gca().add_patch(
+                plt.Rectangle((j-0.5, i-0.5), 1, 1,
+                              ec='black', fc='none', lw=0.6)
+            )
+            if not np.isnan(grid[i, j]):
+                plt.text(j, i, f"{grid[i, j]:.0f}",
+                         ha='center', va='center', fontsize=6, color='k')
+
+    plt.xticks(range(n_veg), [f"V{v}" for v in veg_range])
+    plt.yticks(range(len(elev_edges)-1),
+               [f"{elev_edges[i]}–{elev_edges[i+1]}" for i in range(len(elev_edges)-1)])
+    plt.colorbar(im, label="Bias (days)")
+    plt.title(tag); plt.tight_layout(); plt.show()
+
+
 # ────────────────────────────────────────────────────────────
-#  4) Feature matrix (burn_fraction & burn_cumsum excluded)
+# 4) Feature matrix (burn_fraction & burn_cumsum excluded)
 # ────────────────────────────────────────────────────────────
 def gather_features_nobf(ds, target="DOD"):
     excl = {target.lower(),'lat','lon','latitude','longitude',
@@ -356,14 +395,16 @@ def gather_features_nobf(ds, target="DOD"):
     return feats
 
 def flatten_nobf(ds, target="DOD"):
-    fd=gather_features_nobf(ds,target); names=sorted(fd)
-    X=np.column_stack([fd[n].ravel(order='C') for n in names])
-    y=ds[target].values.ravel(order='C')
-    ok=(~np.isnan(X).any(axis=1)) & np.isfinite(y)
-    return X,y,names,ok
+    fd = gather_features_nobf(ds, target)
+    names = sorted(fd)
+    X = np.column_stack([fd[n].ravel(order='C') for n in names])
+    y = ds[target].values.ravel(order='C')
+    ok = (~np.isnan(X).any(axis=1)) & np.isfinite(y)
+    return X, y, names, ok
+
 
 # ────────────────────────────────────────────────────────────
-#  5) 10 % burn‑fraction bins
+# 5) 10 % burn-fraction bins
 # ────────────────────────────────────────────────────────────
 def eval_bins(y, yp, burn):
     bins=[(0.0,0.1),(0.1,0.2),(0.2,0.3),(0.3,0.4),
@@ -380,39 +421,9 @@ def eval_bins(y, yp, burn):
         print(f"{tag}: N={sel.sum():5d}  RMSE={rmse:6.2f}  "
               f"Bias={bias:7.2f}  R²={r2:6.3f}")
 
-def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag,
-                          elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500)):
-    bias     = y_pred - y_true
-    elev_bin = np.digitize(elev, elev_edges) - 1
-    veg_range = np.arange(1, 24)         # VegTyp 1 … 23
-    grid = np.full((len(elev_edges)-1, len(veg_range)), np.nan)
-
-    for ei in range(len(elev_edges)-1):
-        for vv in veg_range:
-            sel = (elev_bin == ei) & (veg.astype(int) == vv)
-            if sel.any():
-                grid[ei, vv-1] = np.nanmean(bias[sel])
-
-    plt.figure(figsize=(8,4))
-    im = plt.imshow(grid, cmap='seismic', vmin=-60, vmax=60,
-                    origin='lower', aspect='auto')
-    for i in range(grid.shape[0]):
-        for j in range(grid.shape[1]):
-            plt.gca().add_patch(
-                plt.Rectangle((j-0.5, i-0.5), 1, 1,
-                              ec='black', fc='none', lw=.6))
-            if not np.isnan(grid[i, j]):
-                plt.text(j, i, f"{grid[i, j]:.0f}",
-                         ha='center', va='center', fontsize=6, color='k')
-
-    plt.xticks(range(len(veg_range)), [f"V{v}" for v in veg_range])
-    plt.yticks(range(len(elev_edges)-1),
-               [f"{elev_edges[i]}–{elev_edges[i+1]}" for i in range(len(elev_edges)-1)])
-    plt.colorbar(im, label="Bias (days)")
-    plt.title(tag); plt.tight_layout(); plt.show()
 
 # ────────────────────────────────────────────────────────────
-#  6) Main RF experiment
+# 6) Main RF experiment
 # ────────────────────────────────────────────────────────────
 def rf_experiment_nobf(X,y,cat2d,ok,ds,feat_names):
 
@@ -436,37 +447,37 @@ def rf_experiment_nobf(X,y,cat2d,ok,ds,feat_names):
     rf.fit(X_tr,y_tr)
 
     # --- Train diagnostics
-    plot_scatter(y_tr, rf.predict(X_tr), "Train (70 %) – NoBF")
-    plot_bias_hist(y_tr, rf.predict(X_tr), "Bias Hist: Train – NoBF")
+    plot_scatter(y_tr, rf.predict(X_tr), "Train (70 %) – NoBF")
+    plot_bias_hist(y_tr, rf.predict(X_tr), "Bias Hist: Train – NoBF")
 
     # --- Test (all categories)
     yhat_te = rf.predict(X_te)
-    y_hat_all = rf.predict(Xv) 
-    # --- NEW test-set box-plots & histograms --------------------------
+    y_hat_all = rf.predict(Xv)
+
+    # --- Test‐set box-plots & histograms
     boxplot_dod_by_cat(y_te, yhat_te, cat_te,
-                    title_prefix="TEST 30 %")
+                       title_prefix="TEST 30 %")
     transparent_histogram_by_cat(y_te,     cat_te,
-                                "Observed DoD – TEST 30 %")
+                                 "Observed DSD – TEST 30 %")
     transparent_histogram_by_cat(yhat_te, cat_te,
-                                "Predicted DoD – TEST 30 %")
-    # top-5 feature box-plots (full sample — or pass X_te if you only
-    # want the 30 % split)
+                                 "Predicted DSD – TEST 30 %")
+
+    # --- Top-5 predictor box-plots (full sample)
     boxplot_top5_predictors(Xv, feat_names, cat, rf,
                             prefix="Top-5 predictors")
-    
-    # --- NEW full-sample box-plots & histograms ------------------------
+
+    # --- Full-sample box-plots & histograms
     boxplot_dod_by_cat(Yv, y_hat_all, cat,
-                    title_prefix="FULL SAMPLE")
-
+                       title_prefix="FULL SAMPLE")
     transparent_histogram_by_cat(Yv,        cat,
-                                "Observed DoD – FULL sample")
+                                 "Observed DSD – FULL sample")
     transparent_histogram_by_cat(y_hat_all, cat,
-                                "Predicted DoD – FULL sample")
-    
-    plot_scatter(y_te, yhat_te, "Test (30 %) – NoBF")
-    plot_bias_hist(y_te, yhat_te, "Bias Hist: Test – NoBF")
+                                 "Predicted DSD – FULL sample")
 
-    # --- Per‑category diagnostics + maps
+    plot_scatter(y_te, yhat_te, "Test (30 %) – NoBF")
+    plot_bias_hist(y_te, yhat_te, "Bias Hist: Test – NoBF")
+
+    # --- Per-category diagnostics + maps
     pix_full = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
     pix_valid= pix_full[ok]
     cat_te   = cat[te_idx]
@@ -474,27 +485,28 @@ def rf_experiment_nobf(X,y,cat2d,ok,ds,feat_names):
     for c in (0,1,2,3):
         m = cat_te==c
         if not m.any(): continue
-        plot_scatter(y_te[m], yhat_te[m], f"Test cat={c} – NoBF")
-        plot_bias_hist(y_te[m], yhat_te[m], f"Bias Hist cat={c} – NoBF")
+        plot_scatter(y_te[m], yhat_te[m], f"Test cat={c} – NoBF")
+        plot_bias_hist(y_te[m], yhat_te[m], f"Bias Hist cat={c} – NoBF")
+
         dod_map_ca(ds, pix_valid[te_idx][m], y_te[m],
-                   f"Observed DoD – cat {c}", cmap="Blues")
+                   f"Observed DSD – cat {c}", cmap="Blues")
         dod_map_ca(ds, pix_valid[te_idx][m], yhat_te[m],
-                   f"Predicted DoD – cat {c}", cmap="Blues")
+                   f"Predicted DSD – cat {c}", cmap="Blues")
+
         bias_map_ca(ds, pix_valid[te_idx][m], y_te[m], yhat_te[m],
                     f"Pixel Bias – cat {c}")
-        
+
         elev = ds["Elevation"].values.ravel(order='C')[ok][te_idx][m]
         veg  = ds["VegTyp"   ].values.ravel(order='C')[ok][te_idx][m]
         heat_bias_by_elev_veg(y_te[m], yhat_te[m], elev, veg,
-                            f"Elev×Veg Bias – cat {c}")
+                              f"Elev×Veg Bias – cat {c}")
 
-    # --- All‑data colour scatter + bias diagnostics
+    # --- All-data colour scatter + bias diagnostics
     plot_scatter_by_cat(y_te, yhat_te, cat_te,
-                        "All Test Data – colour by cat (NoBF)")
-    plot_bias_hist(y_te, yhat_te, "Bias Hist: ALL Test – NoBF")
+                        "All Test Data – colour by cat (NoBF)")
+    plot_bias_hist(y_te, yhat_te, "Bias Hist: ALL Test – NoBF")
     bias_map_ca(ds, pix_valid[te_idx], y_te, yhat_te,
-                "Pixel Bias: ALL Test – NoBF")
-
+                "Pixel Bias: ALL Test – NoBF")
 
     # --- Wilcoxon (cat1..3 vs cat0)
     bias_vec = yhat_te - y_te
@@ -504,11 +516,11 @@ def rf_experiment_nobf(X,y,cat2d,ok,ds,feat_names):
                 s,p = ranksums(bias_vec[cat_te==0], bias_vec[cat_te==c])
                 print(f"Wilcoxon c{c} vs c0: stat={s:.3f}, p={p:.3g}")
 
-    # --- Down-sampling robustness (100 random draws per cat) -------------
-    counts = {c: (cat_te == c).sum() for c in (0, 1, 2, 3) if (cat_te == c).any()}
-    k = min(counts.values())                      # uniform sample size
-    metrics: Dict[int, Dict[str, List[float]]] = {
-        c: {'bias': [], 'rmse': [], 'r2': []} for c in counts
+    # --- Down-sampling robustness (100 random draws per cat)
+    counts = {c: (cat_te == c).sum() for c in (0,1,2,3) if (cat_te == c).any()}
+    k = min(counts.values())
+    metrics: Dict[int, Dict[str,List[float]]] = {
+        c: {'bias':[], 'rmse':[], 'r2':[]} for c in counts
     }
 
     for c in counts:
@@ -520,70 +532,68 @@ def rf_experiment_nobf(X,y,cat2d,ok,ds,feat_names):
             metrics[c]['rmse'].append(np.sqrt(mean_squared_error(yy, pp)))
             metrics[c]['r2'  ].append(r2_score(yy, pp))
 
-    orig_stats = {c: {
-                    'bias': np.mean(yhat_te[cat_te == c] - y_te[cat_te == c]),
-                    'rmse': np.sqrt(mean_squared_error(
-                                    y_te[cat_te == c], yhat_te[cat_te == c])),
-                    'r2'  : r2_score(
-                                    y_te[cat_te == c], yhat_te[cat_te == c])}
-                for c in counts}
+    orig_stats = {
+        c: {
+            'bias': np.mean(yhat_te[cat_te==c] - y_te[cat_te==c]),
+            'rmse': np.sqrt(mean_squared_error(
+                        y_te[cat_te==c], yhat_te[cat_te==c])),
+            'r2'  : r2_score(y_te[cat_te==c], yhat_te[cat_te==c])
+        } for c in counts
+    }
 
-    col_distr = {0: 'black', 1: 'blue', 3: 'red'}   # shown as histograms
-    col_line  = {2: 'grey'}                         # dashed-line only
+    col_distr = {0:'black', 1:'blue', 3:'red'}  # histogram cats
+    col_line  = {2:'grey'}                      # line-only cat
 
-    fig = plt.figure(figsize=(15, 4))
-    for j, (key, lab) in enumerate([('bias', 'Mean Bias'),
-                                    ('rmse', 'RMSE'),
-                                    ('r2',   'R²')], 1):
-        ax = fig.add_subplot(1, 3, j)
-
-        # histogram categories (cats 0,1,3)
+    fig = plt.figure(figsize=(15,4))
+    for j, (key, lab) in enumerate([('bias','Mean Bias'),
+                                    ('rmse','RMSE'),
+                                    ('r2','R²')],1):
+        ax = fig.add_subplot(1,3,j)
+        # histogram for cats 0,1,3
         for c, col in col_distr.items():
-            ax.hist(metrics[c][key], bins=10, alpha=.45, color=col, label=f"cat{c}")
+            ax.hist(metrics[c][key], bins=10, alpha=0.45,
+                    color=col, label=f"cat{c}")
             ax.axvline(np.mean(metrics[c][key]), color=col, ls='--', lw=2)
             ax.axvline(orig_stats[c][key],      color=col, ls='-',  lw=2)
-
-        # dashed-line-only category (cat 2)
+        # dashed‐line only for cat2
         for c, col in col_line.items():
-            ax.axvline(np.mean(metrics[c][key]), color=col, ls='--', lw=2, label=f"cat{c}")
+            ax.axvline(np.mean(metrics[c][key]), color=col, ls='--', lw=2,
+                       label=f"cat{c}")
             ax.axvline(orig_stats[c][key],       color=col, ls='-',  lw=2)
-
         ax.set_xlabel(lab); ax.set_title(lab)
         if j == 1: ax.legend()
     fig.suptitle(f"Down-sampling distributions (k={k}) – NoBF")
     fig.tight_layout(); plt.show()
 
-
     # --- Feature importance
-    plot_top10_features(rf, feat_names, "Top‑10 Feature Importance – NoBF")
+    plot_top10_features(rf, feat_names, "Top-10 Feature Importance – NoBF")
     plot_top5_feature_scatter(rf, X_te, y_te, cat_te, feat_names,
-                              prefix="Top‑5 (NoBF)")
+                              prefix="Top-5 (NoBF)")
     plot_top5_feature_scatter_binned(rf, X_te, y_te, cat_te, feat_names,
-                              prefix="Top‑5 (NoBF)")
+                              prefix="Top-5 (NoBF)")
 
-    # --- 10 % burn‑fraction bins  (always computed)
+    # --- 10 % burn-fraction bins (Test set)
     bf_full = ds["burn_fraction"].values.ravel(order='C')
-    bf_te   = bf_full[ok][te_idx]            # align with y_te / yhat_te
-    print("\nPerformance by 10 % burn‑fraction bins (Test set):")
+    bf_te = bf_full[ok][te_idx]
+    print("\nPerformance by 10 % burn-fraction bins (Test set):")
     eval_bins(y_te, yhat_te, bf_te)
 
-    # ── G. statistical tests on top-5 features ──────────────────────
+    # ── G. statistical tests on top-5 features ────────────────────
     top5_idx = np.argsort(rf.feature_importances_)[::-1][:5]
     print("\nWilcoxon rank-sum tests on top-5 features (c0 vs c1,c2,c3):")
     for f in top5_idx:
         feat_name = feat_names[f]
         vals = Xv[:, f]
         print(f"\nFeature '{feat_name}':")
-        # grab the values in each category
         vals_c0 = vals[cat == 0]
         for c in (1, 2, 3):
             vals_c = vals[cat == c]
-            if len(vals_c) == 0:
-                continue
+            if len(vals_c) == 0: continue
             stat, p = ranksums(vals_c0, vals_c)
             print(f"  c0 vs c{c}:  stat={stat:.3f}, p={p:.3g}")
 
     return rf
+
 
 # ────────────────────────────────────────────────────────────
 #  MAIN
@@ -592,22 +602,21 @@ if __name__=="__main__":
     log("loading final_dataset4.nc …")
     ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset4.nc")
 
-    merc = ccrs.epsg(3857)
-    x0, y0 = merc.transform_point(CA_LON_W, CA_LAT_S, ccrs.PlateCarree())
-    x1, y1 = merc.transform_point(CA_LON_E, CA_LAT_N, ccrs.PlateCarree())
-    CA_EXTENT = [x0, y0, x1, y1]
-    print("[DEBUG] CA_EXTENT set:", CA_EXTENT)
+    # compute global veg‐type range (only the VegTyp values that occur anywhere)
+    veg_all = ds["VegTyp"].values.ravel(order='C')
+    GLOBAL_VEGRANGE = np.unique(veg_all[np.isfinite(veg_all)].astype(int))
 
-    bc = ds["burn_cumsum"].values
-    cat_2d = np.zeros_like(bc,dtype=int)
-    cat_2d[bc<0.25]=0
-    cat_2d[(bc>=0.25)&(bc<0.5)]=1
-    cat_2d[(bc>=0.5)&(bc<0.75)]=2
-    cat_2d[bc>=0.75]=3
+    # cumulative-burn categories (0…3)
+    bc = ds["burn_cumsum"].values  # (year, pixel)
+    cat_2d = np.zeros_like(bc, dtype=int)
+    cat_2d[bc < 0.25]                  = 0
+    cat_2d[(bc >= 0.25) & (bc < 0.50)] = 1
+    cat_2d[(bc >= 0.50) & (bc < 0.75)] = 2
+    cat_2d[bc >= 0.75]                 = 3
     log("categories (c0..c3) computed")
 
     X_all,y_all,feat_names,ok = flatten_nobf(ds,"DOD")
     log("feature matrix ready (burn_fraction excluded)")
 
     rf_model_nobf = rf_experiment_nobf(X_all,y_all,cat_2d,ok,ds,feat_names)
-    log("ALL DONE (NoBF).")
+    log("ALL DONE (No BF).")
