@@ -110,7 +110,7 @@ def dod_map_ca(ds, pix_idx, values, title,
         vmin=vmin, vmax=vmax,
         s=2, marker="s", transform=merc, zorder=3
     )
-    plt.colorbar(sc, ax=ax, shrink=0.8, label="DoD (days)")
+    plt.colorbar(sc, ax=ax, shrink=0.8, label="DSD (days)")
     ax.set_title(title)
     plt.tight_layout()
     plt.show()
@@ -159,7 +159,7 @@ def boxplot_dod_by_elev_veg(y, elev, veg, tag):
     plt.boxplot(data, showmeans=True)
     plt.xticks(range(1, len(labels)+1), labels, rotation=90)
     plt.xlabel("(Elevation bin, VegTyp)")
-    plt.ylabel("Raw DoD")
+    plt.ylabel("Raw DSD")
     plt.title(tag)
     plt.tight_layout()
     plt.show()
@@ -217,7 +217,7 @@ def plot_scatter(y_true, y_pred, title):
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     bias = (y_pred - y_true).mean();  r2 = r2_score(y_true, y_pred)
     plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DoD");  plt.ylabel("Observed DoD");  plt.legend()
+    plt.xlabel("Predicted DSD");  plt.ylabel("Observed DSD");  plt.legend()
     plt.tight_layout();  plt.show()
 
 def plot_bias_hist(y_true, y_pred, title, rng=(-100,300)):
@@ -241,7 +241,7 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title):
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     bias = (y_pred - y_true).mean();  r2 = r2_score(y_true, y_pred)
     plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DoD");  plt.ylabel("Observed DoD");  plt.legend()
+    plt.xlabel("Predicted DSD");  plt.ylabel("Observed DSD");  plt.legend()
     plt.tight_layout();  plt.show()
 
 def plot_top10_perm_importance(imp, names, title):
@@ -297,7 +297,7 @@ def plot_top5_feature_scatter(imp, X, y, cat, names, prefix):
             plt.plot(mean_x, dod_vals, '-', color=colours[c], alpha=0.7)
 
         plt.xlabel(fname)
-        plt.ylabel("Observed DoD")
+        plt.ylabel("Observed DSD")
         plt.title(f"{prefix}: {fname}")
         plt.legend()
         plt.tight_layout()
@@ -356,8 +356,8 @@ def plot_top5_feature_scatter_binned(imp, X, y, cat, names, prefix, n_bins: int 
             plt.plot(x_valid, y_mean, '-', color=colours[c], alpha=0.7)
 
         plt.xlabel(fname)
-        plt.ylabel("Observed DoD")
-        plt.title(f"{prefix} (binned): {fname}")
+        plt.ylabel("Observed DSD")
+        plt.title(f"{prefix}: {fname}")
         plt.legend()
         plt.tight_layout()
         plt.show()
