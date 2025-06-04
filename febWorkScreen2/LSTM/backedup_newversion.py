@@ -24,6 +24,8 @@ def log(msg: str) -> None:
 # ────────────────────────────────────────────────────────────
 #  plotting helpers (scatter / bias‑hist / feature plots)
 # ────────────────────────────────────────────────────────────
+
+
 def plot_scatter(y_true, y_pred, title):
     plt.figure(figsize=(6,6))
     plt.scatter(y_pred, y_true, alpha=0.3, label=f"N={len(y_true)}")
@@ -47,7 +49,7 @@ def plot_bias_hist(y_true, y_pred, title, rng=(-100,300)):
 
 def plot_scatter_by_cat(y_true, y_pred, cat, title):
     plt.figure(figsize=(6,6))
-    cols = {0:'red', 1:'green', 2:'blue', 3:'orange'}
+    cols = {0:'red', 1:'yellow', 2:'green', 3:'blue'}
     for c,col in cols.items():
         m = cat==c
         if m.any():
@@ -68,19 +70,58 @@ def plot_top10_perm_importance(imp, names, title):
     plt.title(title);  plt.ylabel("Permutation importance (ΔMSE)")
     plt.tight_layout();  plt.show()
 
-def plot_top5_feat_scatter(imp, X, y, cat, names, prefix):
-    idx = np.argsort(imp)[::-1][:5]
-    cols = {0:'red', 1:'blue', 2:'green', 3:'purple'}
-    for i in idx:
-        plt.figure(figsize=(6,5))
-        for c,col in cols.items():
-            m = cat==c
-            plt.scatter(y[m], X[m,i], c=col, alpha=0.4, s=10, label=f"cat={c}")
-        r = np.corrcoef(y, X[:,i])[0,1]
-        plt.legend(title=f"r={r:.2f}")
-        plt.xlabel("Observed DoD");  plt.ylabel(names[i])
-        plt.title(f"{prefix}: {names[i]}")
-        plt.tight_layout();  plt.show()
+
+def plot_top5_feature_scatter(imp, X, y, cat, names, prefix):
+    """
+    Aggregated Top-5 feature scatter:
+      • x-axis  = predictor value (mean of pixels sharing DoD & category)
+      • y-axis  = observed DoD
+      • horizontal bar = ±1 SD
+      • one coloured line per cumulative-burn category
+    """
+    top5    = np.argsort(imp)[::-1][:5]
+    colours = {0:'red', 1:'yellow', 2:'green', 3:'blue'}
+    cats    = [0, 1, 2, 3]
+
+    for f_idx in top5:
+        fname = names[f_idx]
+        x_all = X[:, f_idx]
+
+        plt.figure(figsize=(7, 5))
+        for c in cats:
+            mask_c = (cat == c)
+            if not mask_c.any():
+                continue
+
+            # Pearson r for legend (raw points, not aggregated)
+            r_val = np.corrcoef(x_all[mask_c], y[mask_c])[0, 1]
+
+            # aggregate by unique DoD
+            dod_vals, mean_x, sd_x = [], [], []
+            for d in np.unique(y[mask_c]):
+                m_d = mask_c & (y == d)
+                mean_x.append(np.mean(x_all[m_d]))
+                sd_x.append(np.std(x_all[m_d]))
+                dod_vals.append(d)
+            dod_vals, mean_x, sd_x = map(np.asarray, (dod_vals, mean_x, sd_x))
+            order = np.argsort(dod_vals)
+            dod_vals, mean_x, sd_x = dod_vals[order], mean_x[order], sd_x[order]
+
+            plt.errorbar(mean_x, dod_vals,
+                         xerr=sd_x,
+                         fmt='o', ms=4, lw=1,
+                         color=colours[c], ecolor=colours[c],
+                         alpha=0.8,
+                         label=f"cat={c} (r={r_val:.2f})")
+            plt.plot(mean_x, dod_vals, '-', color=colours[c], alpha=0.7)
+
+        plt.xlabel(fname)
+        plt.ylabel("Observed DoD")
+        plt.title(f"{prefix}: {fname}")
+        plt.legend()
+        plt.tight_layout()
+        plt.show()
+
 
 # ────────────────────────────────────────────────────────────
 #  feature‑matrix helpers  (burn_fraction & burn_cumsum excluded)
@@ -146,8 +187,23 @@ def lstm_unburned_experiment(X, y, cat2d, ok, feat_names,
     unb = cat <= thr
     log(f"  training on unburned (cat ≤ {thr}): N={unb.sum()}")
 
-    X_tr_raw, X_te_raw, y_tr_raw, y_te_raw = train_test_split(
-        Xv[unb], Yv[unb], test_size=0.3, random_state=42)
+    # ── NEW: make a 70 % / 30 % split **inside every training category** ──
+    train_idx, test_idx = [], []
+    for c in range(thr + 1):                      # cats 0 … thr
+        rows = np.where((cat == c) & unb)[0]      # only samples that belong to cat c
+        if rows.size == 0:
+            continue
+        tr, te = train_test_split(rows,
+                                test_size=0.30,
+                                random_state=42)
+        train_idx.append(tr)
+        test_idx .append(te)
+
+    train_idx = np.concatenate(train_idx)
+    test_idx  = np.concatenate(test_idx)
+
+    X_tr_raw, y_tr_raw = Xv[train_idx], Yv[train_idx]
+    X_te_raw, y_te_raw = Xv[test_idx ], Yv[test_idx ]
 
     # scale
     xsc, ysc = StandardScaler(), StandardScaler()
@@ -203,13 +259,13 @@ def lstm_unburned_experiment(X, y, cat2d, ok, feat_names,
             if c in bias_by_cat:
                 s,p = ranksums(bias_by_cat[0], bias_by_cat[c])
                 print(f"  cat {c} vs 0 → stat={s:.3f}, p={p:.3g}")
-
+    
     # D) permutation‑based feature importance (computed on TEST set)
     imp = perm_importance_lstm(model, X_te_sc, y_te_sc,
                                n_repeats=3, batch_size=batch_size)
     plot_top10_perm_importance(imp, feat_names,
                                f"Top‑10 Permutation Importance (thr={thr})")
-    plot_top5_feat_scatter(imp, Xv, Yv, cat, feat_names,
+    plot_top5_feature_scatter(imp, Xv, Yv, cat, feat_names,
                            f"Top‑5 (thr={thr})")
 
     return model

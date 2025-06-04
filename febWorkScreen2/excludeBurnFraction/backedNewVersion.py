@@ -567,6 +567,22 @@ def rf_experiment_nobf(X,y,cat2d,ok,ds,feat_names):
     print("\nPerformance by 10 % burn‑fraction bins (Test set):")
     eval_bins(y_te, yhat_te, bf_te)
 
+    # ── G. statistical tests on top-5 features ──────────────────────
+    top5_idx = np.argsort(rf.feature_importances_)[::-1][:5]
+    print("\nWilcoxon rank-sum tests on top-5 features (c0 vs c1,c2,c3):")
+    for f in top5_idx:
+        feat_name = feat_names[f]
+        vals = Xv[:, f]
+        print(f"\nFeature '{feat_name}':")
+        # grab the values in each category
+        vals_c0 = vals[cat == 0]
+        for c in (1, 2, 3):
+            vals_c = vals[cat == c]
+            if len(vals_c) == 0:
+                continue
+            stat, p = ranksums(vals_c0, vals_c)
+            print(f"  c0 vs c{c}:  stat={stat:.3f}, p={p:.3g}")
+
     return rf
 
 # ────────────────────────────────────────────────────────────
