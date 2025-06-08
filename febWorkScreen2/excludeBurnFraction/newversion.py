@@ -1,246 +1,203 @@
 #!/usr/bin/env python3
 # ============================================================
-#  Fire-ML evaluation on final_dataset4.nc
-#  (burn_fraction *excluded* from predictors)
+#  Fire-ML evaluation on final_dataset4.nc (Experiment 2)
 #  70 %/30 % category-split, whisker plots + uniform-scale maps
+#  burn_fraction **excluded** from predictors
 # ============================================================
-import time, xarray as xr, numpy as np, matplotlib.pyplot as plt
+import time
+import requests
+import xarray as xr
+import numpy as np
+import numpy.random as npr
+import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 from scipy.stats import ranksums, spearmanr
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.inspection import permutation_importance
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_squared_error, r2_score
-import numpy.random as npr
-import cartopy.crs as ccrs, cartopy.feature as cfeature
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+import cartopy.io.img_tiles as cimgt
+import geopandas as gpd
 from typing import List, Dict
-import socket, requests, cartopy.io.img_tiles as cimgt, geopandas as gpd
 
+# ────────────────────────────────────────────────────────────
 PIX_SZ = 2
-CA_LON_W, CA_LON_E = -125.0, -117.0   # west, east
-CA_LAT_S, CA_LAT_N =   37.0,   43.0   # south, north
+CA_LON_W, CA_LON_E = -125.0, -117.0
+CA_LAT_S, CA_LAT_N =   37.0,   43.0
+
+# placeholder for veg types that actually occur
+GLOBAL_VEGRANGE: np.ndarray = np.array([], dtype=int)
+VEG_NAMES = {
+    1:"Urban/Built-Up", 2:"Dry Cropland/Pasture", 3:"Irrigated Crop/Pasture",
+    4:"Mixed Dry/Irrig.", 5:"Crop/Grass Mosaic", 6:"Crop/Wood Mosaic",
+    7:"Grassland", 8:"Shrubland", 9:"Mixed Shrub/Grass",10:"Savanna",
+    11:"Deciduous Broadleaf",12:"Deciduous Needleleaf",13:"Evergreen Broadleaf",
+    14:"Evergreen Needleleaf",15:"Mixed Forest",16:"Water",
+    17:"Herb. Wetland",18:"Wooded Wetland",19:"Barren",20:"Herb. Tundra",
+    21:"Wooded Tundra",22:"Mixed Tundra",23:"Bare Ground Tundra",
+    24:"Snow/Ice",25:"Playa",26:"Lava",27:"White Sand"
+}
+
+STATES_SHP = "data/cb_2022_us_state_500k/cb_2022_us_state_500k.shp"
+STATES = gpd.read_file(STATES_SHP).to_crs(epsg=3857)
 
 # ────────────────────────────────────────────────────────────
-#  0) Timer helper
+#  Human‐readable feature names
 # ────────────────────────────────────────────────────────────
+NICE_NAME = {}
+for season in ("Fall","Winter","Spring","Summer"):
+    for feat in ("Temperature","Precipitation","Humidity","Shortwave","Longwave"):
+        key = f"aorc{season}{feat}"
+        arrow = "↓" if feat=="Shortwave" else ""
+        NICE_NAME[key] = f"{season} {feat}{arrow}"
+NICE_NAME["peakValue"]      = "Peak SWE"
+NICE_NAME["Elevation"]      = "Elevation (m)"
+NICE_NAME["slope"]          = "Slope"
+NICE_NAME["aspect_ratio"]   = "Aspect Ratio"
+NICE_NAME["VegTyp"]         = "Vegetation Type"
+NICE_NAME["sweWinter"]      = "Winter SWE"
+NICE_NAME["burn_fraction"]  = "Burn Fraction"
+
+# ────────────────────────────────────────────────────────────
+# 0) Timer
 T0 = time.time()
 def log(msg: str) -> None:
     print(f"[{time.time()-T0:7.1f}s] {msg}", flush=True)
 
 # ────────────────────────────────────────────────────────────
-#  Global veg‐type range (will be set once we know which veg types occur)
-# ────────────────────────────────────────────────────────────
-GLOBAL_VEGRANGE: np.ndarray = np.array([], dtype=int)
+# 1) Basic plotting helpers
 
-
-# ────────────────────────────────────────────────────────────
-#  1) Generic plotting helpers
-# ────────────────────────────────────────────────────────────
-def plot_scatter(y_true, y_pred, title):
+def plot_scatter(y_true, y_pred, title=None):
+    """Scatter w/ 1:1 line; no legend/title if title=None."""
     plt.figure(figsize=(6,6))
-    plt.scatter(y_pred, y_true, alpha=0.3, label=f"N={len(y_true)}")
-    mn, mx = min(y_pred.min(),y_true.min()), max(y_pred.max(),y_true.max())
-    plt.plot([mn,mx],[mn,mx],'k--', label="1:1 line")
-    rmse = np.sqrt(mean_squared_error(y_true,y_pred))
-    bias = (y_pred-y_true).mean(); r2 = r2_score(y_true,y_pred)
-    plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DSD"); plt.ylabel("Observed DSD"); plt.legend()
-    plt.tight_layout(); plt.show()
+    plt.scatter(y_pred, y_true, alpha=0.3)
+    mn, mx = min(y_pred.min(), y_true.min()), max(y_pred.max(), y_true.max())
+    plt.plot([mn,mx],[mn,mx],'k--')
+    if title is not None:
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        bias = (y_pred-y_true).mean()
+        r2   = r2_score(y_true, y_pred)
+        plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
+    plt.xlabel("Predicted DSD")
+    plt.ylabel("Observed DSD")
+    plt.tight_layout()
+    plt.show()
 
-def plot_bias_hist(y_true, y_pred, title, rng=(-100,100)):
+def plot_bias_hist(y_true, y_pred, title=None, rng=(-100,300)):
+    """Bias histogram from –100 to 300, big N, and Mean/Std/R² title."""
     res = y_pred - y_true
-    plt.figure(figsize=(6,4))
-    plt.hist(res, bins=50, range=rng, alpha=0.7)
-    plt.axvline(res.mean(), color='k', ls='--', lw=2)
-    plt.title(f"{title}\nMean={res.mean():.2f}, Std={res.std():.2f}")
-    plt.xlabel("Bias (Pred-Obs)"); plt.ylabel("Count")
-    plt.tight_layout(); plt.show()
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.hist(res, bins=50, range=rng, alpha=0.7)
+    ax.axvline(res.mean(), color='k', ls='--', lw=2)
+    ax.text(0.02, 0.95, f"N={len(y_true)}", transform=ax.transAxes,
+            fontsize=14, va='top')
+    mean, std, r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
+    ax.set_title(f"Mean={mean:.2f}, Std={std:.2f}, R²={r2:.3f}")
+    ax.set_xlabel("Bias (Pred − Obs, Days)")
+    ax.set_ylabel("Count")
+    plt.tight_layout()
+    plt.show()
 
-def plot_scatter_by_cat(y_true, y_pred, cat, title):
+def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
+    """Colour by cat; no legend or title."""
     plt.figure(figsize=(6,6))
     cols = {0:'red',1:'yellow',2:'green',3:'blue'}
+    mn, mx = min(y_pred.min(), y_true.min()), max(y_pred.max(), y_true.max())
     for c,col in cols.items():
         m = cat==c
         if m.any():
-            plt.scatter(y_pred[m], y_true[m], c=col, alpha=0.4, label=f"cat={c}")
-    mn, mx = min(y_pred.min(),y_true.min()), max(y_pred.max(),y_true.max())
+            plt.scatter(y_pred[m], y_true[m], c=col, alpha=0.4)
     plt.plot([mn,mx],[mn,mx],'k--')
-    rmse = np.sqrt(mean_squared_error(y_true,y_pred))
-    bias = (y_pred-y_true).mean(); r2 = r2_score(y_true,y_pred)
-    plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DSD"); plt.ylabel("Observed DSD"); plt.legend()
-    plt.tight_layout(); plt.show()
+    plt.xlabel("Predicted DSD")
+    plt.ylabel("Observed DSD")
+    plt.tight_layout()
+    plt.show()
 
-def plot_top10_features(rf, names, title):
+def plot_top10_features(rf, names):
+    """Bar chart of RF feature_importances_; no title; NICE_NAME xticks."""
     imp = rf.feature_importances_
     idx = np.argsort(imp)[::-1][:10]
     plt.figure(figsize=(8,4))
     plt.bar(range(10), imp[idx])
-    plt.xticks(range(10), [names[i] for i in idx], rotation=45, ha='right')
-    plt.title(title); plt.ylabel("Feature Importance"); plt.tight_layout(); plt.show()
+    plt.xticks(range(10),
+               [NICE_NAME.get(names[i], names[i]) for i in idx],
+               rotation=45, ha='right')
+    plt.ylabel("Feature importance")
+    plt.tight_layout()
+    plt.show()
+
+def plot_permutation_importance(rf, X_val, y_val, names):
+    """Bar chart of permutation importances; no title; NICE_NAME xticks."""
+    res = permutation_importance(rf, X_val, y_val,
+                                 n_repeats=5, random_state=42)
+    imp = res.importances_mean
+    idx = np.argsort(imp)[::-1][:10]
+    plt.figure(figsize=(8,4))
+    plt.bar(range(10), imp[idx])
+    plt.xticks(range(10),
+               [NICE_NAME.get(names[i], names[i]) for i in idx],
+               rotation=45, ha='right')
+    plt.ylabel("Permutation importance")
+    plt.tight_layout()
+    plt.show()
 
 
 # ────────────────────────────────────────────────────────────
-#  2) Aggregated Top-5 whisker scatter
-# ────────────────────────────────────────────────────────────
-def plot_top5_feature_scatter(rf, X, y, cat, names, prefix):
+# 2) Top-5 binned feature scatter (Spearman + p-value formatting)
+
+def plot_top5_feature_scatter_binned(
+    rf,
+    X: np.ndarray,
+    y: np.ndarray,
+    cat: np.ndarray,
+    names: List[str],
+    n_bins: int = 20
+):
     imp  = rf.feature_importances_
     top5 = np.argsort(imp)[::-1][:5]
     cols = {0:'red',1:'yellow',2:'green',3:'blue'}
-    for f_idx in top5:
-        fname = names[f_idx]; feat = X[:,f_idx]
+
+    for rank, f_idx in enumerate(top5, start=1):
+        fname = names[f_idx]
+        pretty = NICE_NAME.get(fname, fname)
+
+        x_all = X[:,f_idx]
+        edges = np.linspace(x_all.min(), x_all.max(), n_bins+1)
+        centers = 0.5*(edges[:-1]+edges[1:])
+
         plt.figure(figsize=(7,5))
         for c,col in cols.items():
-            m_c = cat==c
-            if not m_c.any(): continue
-            # still showing Pearson here; if you only want Spearman, swap similarly
-            r_val = np.corrcoef(feat[m_c], y[m_c])[0,1]
-            dod, mean_x, sd_x = [], [], []
-            for d in np.unique(y[m_c]):
-                m_d = m_c & (y==d)
-                dod.append(d)
-                mean_x.append(np.mean(feat[m_d]))
-                sd_x.append(np.std(feat[m_d]))
-            dod   = np.array(dod)
-            mean_x= np.array(mean_x)
-            sd_x  = np.array(sd_x)
-            order = np.argsort(dod)
-            dod, mean_x, sd_x = dod[order], mean_x[order], sd_x[order]
-            plt.errorbar(mean_x, dod, xerr=sd_x,
-                         fmt='o', ms=4, lw=1,
-                         color=col, ecolor=col, alpha=0.8,
-                         label=f"cat={c} (r={r_val:.2f})")
-            plt.plot(mean_x, dod, '-', color=col, alpha=0.7)
-        plt.xlabel(fname); plt.ylabel("Observed DSD")
-        plt.title(f"{prefix}: {fname}"); plt.legend(); plt.tight_layout(); plt.show()
-
-
-def plot_top5_feature_scatter_binned(
-        rf: RandomForestRegressor,
-        X: np.ndarray,
-        y: np.ndarray,
-        cat: np.ndarray,
-        names: List[str],
-        prefix: str,
-        n_bins: int = 20):
-    """
-    Same colour/legend convention as the original scatter, but
-    uses Spearman ρ + p-value in the legend.
-    • divide each feature into *n_bins* equal-width bins
-    • for each bin & category: compute mean(DoD) ±1 SD(DoD)
-    • connect as a line; legend shows Spearman ρ and p-value
-    """
-    imp  = rf.feature_importances_
-    top5 = np.argsort(imp)[::-1][:5]
-    colours = {0: 'red', 1: 'yellow', 2: 'green', 3: 'blue'}
-    cats    = [0, 1, 2, 3]
-
-    for f_idx in top5:
-        fname = names[f_idx]
-        x_all = X[:, f_idx]
-        edges   = np.linspace(x_all.min(), x_all.max(), n_bins + 1)
-        centres = 0.5 * (edges[:-1] + edges[1:])
-
-        plt.figure(figsize=(7, 5))
-        for c in cats:
-            mask_c = (cat == c)
-            if not mask_c.any():
-                continue
-
-            # Spearman rho + p-value
-            rho, pval = spearmanr(x_all[mask_c], y[mask_c])
-
-            y_mean, y_sd, x_valid = [], [], []
+            m = cat==c
+            if not m.any(): continue
+            rho,p = spearmanr(x_all[m], y[m])
+            if   p == 0:     p_label = "p=0"
+            elif p < 0.01:   p_label = "p<0.01"
+            else:            p_label = f"p={p:.2g}"
+            ymu, ysd, xv = [], [], []
             for i in range(n_bins):
-                m_bin = mask_c & (x_all >= edges[i]) & (x_all < edges[i + 1])
-                if not m_bin.any():
-                    continue
-                y_mean.append(y[m_bin].mean())
-                y_sd  .append(y[m_bin].std(ddof=0))
-                x_valid.append(centres[i])
+                sel = m & (x_all>=edges[i]) & (x_all<edges[i+1])
+                if not sel.any(): continue
+                ymu.append(y[sel].mean())
+                ysd.append(y[sel].std(ddof=0))
+                xv.append(centers[i])
+            if not xv: continue
 
-            if not x_valid:
-                continue
+            plt.errorbar(xv, ymu, yerr=ysd, fmt='o', ms=4, lw=1,
+                         color=col, ecolor=col, alpha=0.8,
+                         label=f"cat={c} (ρ={rho:.2f}, {p_label})")
+            plt.plot(xv, ymu, '-', color=col, alpha=0.7)
 
-            x_valid = np.array(x_valid)
-            y_mean  = np.array(y_mean)
-            y_sd    = np.array(y_sd)
-
-            plt.errorbar(x_valid, y_mean,
-                         yerr=y_sd,
-                         fmt='o', ms=4, lw=1,
-                         color=colours[c], ecolor=colours[c],
-                         alpha=0.8,
-                         label=f"cat={c} (ρ={rho:.2f}, p={pval:.2g})")
-            plt.plot(x_valid, y_mean, '-', color=colours[c], alpha=0.7)
-
-        plt.xlabel(fname)
-        plt.ylabel("Observed DSD")
-        plt.title(f"{prefix} (binned): {fname}")
+        plt.xlabel(pretty)
+        plt.ylabel("Observed DSD (days)")
+        plt.title(f"Feature {rank}")
         plt.legend()
-        plt.tight_layout(); plt.show()
-
-
-# ────────────────────────────────────────────────────────────
-# 3) Extra diagnostic plots (box-plots & histograms)
-# ────────────────────────────────────────────────────────────
-def boxplot_dod_by_cat(y_obs, y_pred, cat, title_prefix, fname_base=None):
-    cats = [0, 1, 2, 3]
-    data_obs = [y_obs[cat == c] for c in cats]
-    data_pred = [y_pred[cat == c] for c in cats]
-
-    fig, axs = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
-    axs[0].boxplot(data_obs, showmeans=True)
-    axs[0].set_title(f"{title_prefix} – OBSERVED")
-    axs[1].boxplot(data_pred, showmeans=True)
-    axs[1].set_title(f"{title_prefix} – PREDICTED")
-    for ax in axs:
-        ax.set_xticklabels([f"c{c}" for c in cats]);  ax.set_xlabel("Category")
-    axs[0].set_ylabel("DSD (days)")
-    fig.tight_layout()
-    if fname_base:
-        fig.savefig(f"{fname_base}.png", dpi=300)
-    plt.show()
-
-
-def boxplot_top5_predictors(X, feat_names, cat, rf, prefix, fname_base=None):
-    idx = np.argsort(rf.feature_importances_)[::-1][:5]
-    cats = [0, 1, 2, 3]
-    for i in idx:
-        data = [X[cat == c, i] for c in cats]
-        plt.figure(figsize=(5, 3.5))
-        plt.boxplot(data, showmeans=True)
-        plt.xticks(range(1, 5), [f"c{c}" for c in cats])
-        plt.ylabel(feat_names[i])
-        plt.title(f"{prefix}: {feat_names[i]}")
         plt.tight_layout()
-        if fname_base:
-            plt.savefig(f"{fname_base}_{feat_names[i]}.png", dpi=300)
         plt.show()
 
-
-def transparent_histogram_by_cat(values, cat, title, alpha=0.35,
-                                 colors={0:'red',1:'yellow',2:'green',3:'blue'},
-                                 fname=None):
-    plt.figure(figsize=(6,4))
-    rng = (np.nanmin(values), np.nanmax(values))
-    bins = 40
-    for c, col in colors.items():
-        sel = cat == c
-        if sel.any():
-            plt.hist(values[sel], bins=bins, range=rng,
-                     alpha=alpha, color=col, label=f"c{c}", density=True)
-    plt.xlabel("DSD (days)")
-    plt.ylabel("relative freq.")
-    plt.title(title)
-    plt.legend()
-    plt.tight_layout()
-    if fname:
-        plt.savefig(fname, dpi=300)
-    plt.show()
-
-
 # ────────────────────────────────────────────────────────────
-# 4) Spatial helpers
+# 3) Spatial helpers
 # ────────────────────────────────────────────────────────────
 TILER = cimgt.GoogleTiles(style='satellite')
 TILER.request_timeout = 5
@@ -333,290 +290,239 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred, title):
         s=PIX_SZ, marker="s", transform=merc, zorder=3
     )
     plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Pred-Obs, days)")
-    ax.set_title(title); plt.tight_layout(); plt.show()
+    #ax.set_title(title); 
+    plt.tight_layout(); plt.show()
 
-def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag,
+# ────────────────────────────────────────────────────────────
+# 4) Elev×Veg and boxplots
+def boxplot_dod_by_cat(y_obs, y_pred, cat, title_prefix):
+    cats = [0,1,2,3]
+    data_obs = [y_obs[cat==c] for c in cats]
+    data_pre = [y_pred[cat==c] for c in cats]
+    fig, axs = plt.subplots(1,2,figsize=(10,4), sharey=True)
+    axs[0].boxplot(data_obs, showmeans=True); axs[0].set_title(f"{title_prefix} – OBS")
+    axs[1].boxplot(data_pre,showmeans=True); axs[1].set_title(f"{title_prefix} – PRED")
+    for ax in axs:
+        ax.set_xticklabels([f"c{c}" for c in cats]); ax.set_xlabel("Category")
+    axs[0].set_ylabel("DSD (days)")
+    plt.tight_layout()
+    plt.show()
+
+def transparent_histogram_by_cat(vals, cat, title):
+    plt.figure(figsize=(6,4))
+    rng = (np.nanmin(vals), np.nanmax(vals))
+    for c,col in {0:'red',1:'yellow',2:'green',3:'blue'}.items():
+        sel = cat==c
+        if sel.any():
+            plt.hist(vals[sel], bins=40, range=rng, alpha=0.35,
+                     label=f"c{c}", density=True, color=col)
+    plt.xlabel("DSD (days)"); plt.ylabel("relative freq.")
+    plt.title(title); plt.legend(); plt.tight_layout(); plt.show()
+
+def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, title=None,
                           elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500)):
-    """
-    Elev×VegTyp grid of mean bias (Pred − Obs), clipped to ±60 days.
-    Only VegTyp columns that occur anywhere in the data are shown.
-    """
-    bias      = y_pred - y_true
-    elev_bin  = np.digitize(elev, elev_edges) - 1
-    veg_range = GLOBAL_VEGRANGE               # only real veg types
-    n_veg     = len(veg_range)
-
-    grid = np.full((len(elev_edges)-1, n_veg), np.nan)
-    for ei in range(len(elev_edges)-1):
-        for j, vv in enumerate(veg_range):
-            sel = (elev_bin == ei) & (veg.astype(int) == vv)
+    bias = y_pred - y_true
+    elev_bin = np.digitize(elev, elev_edges) - 1
+    vrange = GLOBAL_VEGRANGE; nveg = len(vrange)
+    grid = np.full((len(elev_edges)-1,nveg), np.nan)
+    for i in range(len(elev_edges)-1):
+        for j,v in enumerate(vrange):
+            sel = (elev_bin==i)&(veg==v)
             if sel.any():
-                grid[ei, j] = np.nanmean(bias[sel])
-
+                grid[i,j] = np.nanmean(bias[sel])
     plt.figure(figsize=(8,4))
-    im = plt.imshow(
-        grid, cmap='seismic_r', vmin=-60, vmax=60,
-        origin='lower', aspect='auto'
-    )
+    im = plt.imshow(grid, cmap='seismic_r', vmin=-60, vmax=60,
+                    origin='lower', aspect='auto')
     for i in range(grid.shape[0]):
         for j in range(grid.shape[1]):
-            plt.gca().add_patch(
-                plt.Rectangle((j-0.5, i-0.5), 1, 1,
-                              ec='black', fc='none', lw=0.6)
-            )
-            if not np.isnan(grid[i, j]):
-                plt.text(j, i, f"{grid[i, j]:.0f}",
-                         ha='center', va='center', fontsize=6, color='k')
-
-    plt.xticks(range(n_veg), [f"V{v}" for v in veg_range])
+            plt.gca().add_patch(plt.Rectangle((j-0.5,i-0.5),1,1,
+                                              ec='black',fc='none',lw=0.6))
+            if not np.isnan(grid[i,j]):
+                plt.text(j, i, f"{grid[i,j]:.0f}", ha='center',va='center',fontsize=6)
+    plt.xticks(range(nveg), [VEG_NAMES[v] for v in vrange], rotation=45,ha='right')
     plt.yticks(range(len(elev_edges)-1),
-               [f"{elev_edges[i]}–{elev_edges[i+1]}" for i in range(len(elev_edges)-1)])
+               [f"{elev_edges[i]}–{elev_edges[i+1]} m" for i in range(len(elev_edges)-1)])
     plt.colorbar(im, label="Bias (days)")
-    plt.title(tag); plt.tight_layout(); plt.show()
-
+    plt.tight_layout()
+    plt.show()
 
 # ────────────────────────────────────────────────────────────
-# 4) Feature matrix (burn_fraction & burn_cumsum excluded)
-# ────────────────────────────────────────────────────────────
+# 5) Feature matrix
 def gather_features_nobf(ds, target="DOD"):
     excl = {target.lower(),'lat','lon','latitude','longitude',
             'pixel','year','ncoords_vector','nyears_vector',
             'burn_fraction','burn_cumsum',
             'aorcsummerhumidity','aorcsummerprecipitation',
             'aorcsummerlongwave','aorcsummershortwave','aorcsummertemperature'}
-    ny = ds.dims['year']; feats={}
+    ny = ds.sizes['year']; feats = {}
     for v in ds.data_vars:
         if v.lower() in excl: continue
         da = ds[v]
-        if set(da.dims)=={'year','pixel'}:
-            feats[v]=da.values
+        if set(da.dims)=={'year','pixel'}: feats[v]=da.values
         elif set(da.dims)=={'pixel'}:
-            feats[v]=np.tile(da.values,(ny,1))
+            feats[v] = np.tile(da.values, (ny,1))
     return feats
 
 def flatten_nobf(ds, target="DOD"):
-    fd = gather_features_nobf(ds, target)
+    fd = gather_features_nobf(ds,target)
     names = sorted(fd)
     X = np.column_stack([fd[n].ravel(order='C') for n in names])
     y = ds[target].values.ravel(order='C')
     ok = (~np.isnan(X).any(axis=1)) & np.isfinite(y)
-    return X, y, names, ok
-
+    return X,y,names,ok
 
 # ────────────────────────────────────────────────────────────
-# 5) 10 % burn-fraction bins
-# ────────────────────────────────────────────────────────────
+# 6) 10 % burn-fraction bins
 def eval_bins(y, yp, burn):
-    bins=[(0.0,0.1),(0.1,0.2),(0.2,0.3),(0.3,0.4),
-          (0.4,0.5),(0.5,0.6),(0.6,0.7),(0.7,0.8),
-          (0.8,0.9),(0.9,None)]
+    bins = [(i/10, (i+1)/10) for i in range(9)] + [(0.9, None)]
     for lo,hi in bins:
-        sel=(burn>lo) if hi is None else ((burn>=lo)&(burn<hi))
-        tag=f">{lo*100:.0f}%" if hi is None else f"{lo*100:.0f}-{hi*100:.0f}%"
+        if hi is None:
+            sel = burn>lo; tag=f">{lo*100:.0f}%"
+        else:
+            sel = (burn>=lo)&(burn<hi); tag=f"{lo*100:.0f}-{hi*100:.0f}%"
         if sel.sum()==0:
-            print(f"{tag}: N=0")
-            continue
-        rmse=np.sqrt(mean_squared_error(y[sel],yp[sel]))
-        bias=(yp[sel]-y[sel]).mean(); r2=r2_score(y[sel],yp[sel])
-        print(f"{tag}: N={sel.sum():5d}  RMSE={rmse:6.2f}  "
-              f"Bias={bias:7.2f}  R²={r2:6.3f}")
-
+            print(f"{tag}: N=0"); continue
+        rmse = np.sqrt(mean_squared_error(y[sel], yp[sel]))
+        bias= (yp[sel]-y[sel]).mean(); r2 = r2_score(y[sel], yp[sel])
+        print(f"{tag}: N={sel.sum():4d}  RMSE={rmse:.2f}  Bias={bias:.2f}  R²={r2:.3f}")
 
 # ────────────────────────────────────────────────────────────
-# 6) Main RF experiment
-# ────────────────────────────────────────────────────────────
-def rf_experiment_nobf(X,y,cat2d,ok,ds,feat_names):
-
+# 7) Main RF experiment (70/30 per cat)
+def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names):
+    # flatten
     cat = cat2d.ravel(order='C')[ok]
     Xv, Yv = X[ok], y[ok]
 
     # 70/30 split per category
     tr_idx, te_idx = [], []
     for c in (0,1,2,3):
-        rows=np.where(cat==c)[0]
+        rows = np.where(cat==c)[0]
         if rows.size==0: continue
-        tr,te=train_test_split(rows,test_size=0.3,random_state=42)
+        tr, te = train_test_split(rows, test_size=0.3, random_state=42)
         tr_idx.append(tr); te_idx.append(te)
-    tr_idx=np.concatenate(tr_idx); te_idx=np.concatenate(te_idx)
+    tr_idx = np.concatenate(tr_idx)
+    te_idx = np.concatenate(te_idx)
     cat_te = cat[te_idx]
 
-    X_tr,y_tr = Xv[tr_idx],Yv[tr_idx]
-    X_te,y_te = Xv[te_idx],Yv[te_idx]
-
+    # train & fit
+    X_tr, y_tr = Xv[tr_idx], Yv[tr_idx]
     rf = RandomForestRegressor(n_estimators=100, random_state=42)
-    rf.fit(X_tr,y_tr)
+    rf.fit(X_tr, y_tr)
 
-    # --- Train diagnostics
-    plot_scatter(y_tr, rf.predict(X_tr), "Train (70 %) – NoBF")
-    plot_bias_hist(y_tr, rf.predict(X_tr), "Bias Hist: Train – NoBF")
-
-    # --- Test (all categories)
+    # TEST predictions
+    X_te, y_te = Xv[te_idx], Yv[te_idx]
     yhat_te = rf.predict(X_te)
-    y_hat_all = rf.predict(Xv)
 
-    # --- Test‐set box-plots & histograms
-    boxplot_dod_by_cat(y_te, yhat_te, cat_te,
-                       title_prefix="TEST 30 %")
-    transparent_histogram_by_cat(y_te,     cat_te,
-                                 "Observed DSD – TEST 30 %")
-    transparent_histogram_by_cat(yhat_te, cat_te,
-                                 "Predicted DSD – TEST 30 %")
-
-    # --- Top-5 predictor box-plots (full sample)
-    boxplot_top5_predictors(Xv, feat_names, cat, rf,
-                            prefix="Top-5 predictors")
-
-    # --- Full-sample box-plots & histograms
-    boxplot_dod_by_cat(Yv, y_hat_all, cat,
-                       title_prefix="FULL SAMPLE")
-    transparent_histogram_by_cat(Yv,        cat,
-                                 "Observed DSD – FULL sample")
-    transparent_histogram_by_cat(y_hat_all, cat,
-                                 "Predicted DSD – FULL sample")
-
-    plot_scatter(y_te, yhat_te, "Test (30 %) – NoBF")
-    plot_bias_hist(y_te, yhat_te, "Bias Hist: Test – NoBF")
-
-    # --- Per-category diagnostics + maps
-    pix_full = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
-    pix_valid= pix_full[ok]
-    cat_te   = cat[te_idx]
-
+    # A) per-category scatter & bias-hist
     for c in (0,1,2,3):
         m = cat_te==c
         if not m.any(): continue
-        plot_scatter(y_te[m], yhat_te[m], f"Test cat={c} – NoBF")
-        plot_bias_hist(y_te[m], yhat_te[m], f"Bias Hist cat={c} – NoBF")
+        plot_scatter(    y_te[m],  yhat_te[m],    title=None)
+        plot_bias_hist(  y_te[m],  yhat_te[m],    title=None)
 
-        dod_map_ca(ds, pix_valid[te_idx][m], y_te[m],
-                   f"Observed DSD – cat {c}", cmap="Blues")
-        dod_map_ca(ds, pix_valid[te_idx][m], yhat_te[m],
-                   f"Predicted DSD – cat {c}", cmap="Blues")
+    # B) pixel-bias maps (no titles)
+    pix_full = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
+    pix_ok   = pix_full[ok]
+    for c in (None, *[0,1,2,3]):
+        if c is None:
+            idx = pix_ok[te_idx]
+            ytrue, ypred = y_te, yhat_te
+        else:
+            mask = cat_te==c
+            idx = pix_ok[te_idx][mask]
+            ytrue, ypred = y_te[mask], yhat_te[mask]
+        bias_map_ca(ds, idx, ytrue, ypred, title=None)
 
-        bias_map_ca(ds, pix_valid[te_idx][m], y_te[m], yhat_te[m],
-                    f"Pixel Bias – cat {c}")
-
+    # C) Elev×Veg per test-category
+    for c in (0,1,2,3):
+        m = cat_te==c
+        if not m.any(): continue
         elev = ds["Elevation"].values.ravel(order='C')[ok][te_idx][m]
-        veg  = ds["VegTyp"   ].values.ravel(order='C')[ok][te_idx][m]
-        heat_bias_by_elev_veg(y_te[m], yhat_te[m], elev, veg,
-                              f"Elev×Veg Bias – cat {c}")
+        veg  = ds["VegTyp"]   .values.ravel(order='C')[ok][te_idx][m].astype(int)
+        heat_bias_by_elev_veg(y_te[m], yhat_te[m], elev, veg, title=None)
 
-    # --- All-data colour scatter + bias diagnostics
-    plot_scatter_by_cat(y_te, yhat_te, cat_te,
-                        "All Test Data – colour by cat (NoBF)")
-    plot_bias_hist(y_te, yhat_te, "Bias Hist: ALL Test – NoBF")
-    bias_map_ca(ds, pix_valid[te_idx], y_te, yhat_te,
-                "Pixel Bias: ALL Test – NoBF")
+    # D) feature importance
+    plot_top10_features(rf, feat_names)
+    plot_permutation_importance(rf, Xv, Yv, feat_names)
 
-    # --- Wilcoxon (cat1..3 vs cat0)
-    bias_vec = yhat_te - y_te
-    if (cat_te==0).any():
-        for c in (1,2,3):
-            if (cat_te==c).any():
-                s,p = ranksums(bias_vec[cat_te==0], bias_vec[cat_te==c])
-                print(f"Wilcoxon c{c} vs c0: stat={s:.3f}, p={p:.3g}")
+    # E) top-5 binned
+    plot_top5_feature_scatter_binned(rf, Xv, Yv, cat, feat_names)
 
-    # --- Down-sampling robustness (100 random draws per cat)
-    counts = {c: (cat_te == c).sum() for c in (0,1,2,3) if (cat_te == c).any()}
+    # F) down-sampling robustness
+    counts = {c:(cat_te==c).sum() for c in (0,1,2,3) if (cat_te==c).any()}
     k = min(counts.values())
-    metrics: Dict[int, Dict[str,List[float]]] = {
-        c: {'bias':[], 'rmse':[], 'r2':[]} for c in counts
-    }
-
-    for c in counts:
-        idx_c = np.where(cat_te == c)[0]
+    metrics = {c:{'bias':[], 'rmse':[], 'r2':[]} for c in counts}
+    for c,n in counts.items():
+        idx_c = np.where(cat_te==c)[0]
         for _ in range(100):
             sub = npr.choice(idx_c, size=k, replace=False)
-            yy, pp = y_te[sub], yhat_te[sub]
-            metrics[c]['bias'].append(np.mean(pp - yy))
-            metrics[c]['rmse'].append(np.sqrt(mean_squared_error(yy, pp)))
-            metrics[c]['r2'  ].append(r2_score(yy, pp))
+            y_s, p_s = y_te[sub], yhat_te[sub]
+            metrics[c]['bias'].append((p_s-y_s).mean())
+            metrics[c]['rmse'].append(np.sqrt(mean_squared_error(y_s,p_s)))
+            metrics[c]['r2'].append(r2_score(y_s,p_s))
 
-    orig_stats = {
-        c: {
-            'bias': np.mean(yhat_te[cat_te==c] - y_te[cat_te==c]),
-            'rmse': np.sqrt(mean_squared_error(
-                        y_te[cat_te==c], yhat_te[cat_te==c])),
-            'r2'  : r2_score(y_te[cat_te==c], yhat_te[cat_te==c])
-        } for c in counts
-    }
-
-    col_distr = {0:'black', 1:'blue', 3:'red'}  # histogram cats
-    col_line  = {2:'grey'}                      # line-only cat
+    orig = {c:{
+        'bias': np.mean(metrics[c]['bias']),
+        'rmse': np.mean(metrics[c]['rmse']),
+        'r2':   np.mean(metrics[c]['r2'])
+    } for c in metrics}
 
     fig = plt.figure(figsize=(15,4))
-    for j, (key, lab) in enumerate([('bias','Mean Bias'),
-                                    ('rmse','RMSE'),
-                                    ('r2','R²')],1):
+    for j,(key,lab) in enumerate([('bias','Mean Bias'),
+                                  ('rmse','RMSE'),
+                                  ('r2','R²')], 1):
         ax = fig.add_subplot(1,3,j)
-        # histogram for cats 0,1,3
-        for c, col in col_distr.items():
-            ax.hist(metrics[c][key], bins=10, alpha=0.45,
-                    color=col, label=f"cat{c}")
-            ax.axvline(np.mean(metrics[c][key]), color=col, ls='--', lw=2)
-            ax.axvline(orig_stats[c][key],      color=col, ls='-',  lw=2)
-        # dashed‐line only for cat2
-        for c, col in col_line.items():
-            ax.axvline(np.mean(metrics[c][key]), color=col, ls='--', lw=2,
-                       label=f"cat{c}")
-            ax.axvline(orig_stats[c][key],       color=col, ls='-',  lw=2)
-        ax.set_xlabel(lab); ax.set_title(lab)
-        if j == 1: ax.legend()
-    fig.suptitle(f"Down-sampling distributions (k={k}) – NoBF")
-    fig.tight_layout(); plt.show()
+        for c,col in {0:'black',1:'blue',3:'red'}.items():
+            ax.hist(metrics[c][key], bins=10, alpha=0.45, color=col)
+            ax.axvline(orig[c][key], color=col, ls='-', lw=2)
+        # cat2 line-only
+        ax.axvline(orig[2][key], color='grey', ls='-', lw=2)
+        ax.set_xlabel(lab)
+    fig.suptitle(f"Experiment 2 (k={k})")
+    plt.tight_layout()
+    plt.show()
 
-    # --- Feature importance
-    plot_top10_features(rf, feat_names, "Top-10 Feature Importance – NoBF")
-    plot_top5_feature_scatter(rf, X_te, y_te, cat_te, feat_names,
-                              prefix="Top-5 (NoBF)")
-    plot_top5_feature_scatter_binned(rf, X_te, y_te, cat_te, feat_names,
-                              prefix="Top-5 (NoBF)")
-
-    # --- 10 % burn-fraction bins (Test set)
-    bf_full = ds["burn_fraction"].values.ravel(order='C')
-    bf_te = bf_full[ok][te_idx]
+    # G) burn-fraction bins
+    bf = ds["burn_fraction"].values.ravel(order='C')[ok][te_idx]
     print("\nPerformance by 10 % burn-fraction bins (Test set):")
-    eval_bins(y_te, yhat_te, bf_te)
+    eval_bins(y_te, yhat_te, bf)
 
-    # ── G. statistical tests on top-5 features ────────────────────
-    top5_idx = np.argsort(rf.feature_importances_)[::-1][:5]
-    print("\nWilcoxon rank-sum tests on top-5 features (c0 vs c1,c2,c3):")
-    for f in top5_idx:
-        feat_name = feat_names[f]
-        vals = Xv[:, f]
-        print(f"\nFeature '{feat_name}':")
-        vals_c0 = vals[cat == 0]
-        for c in (1, 2, 3):
-            vals_c = vals[cat == c]
-            if len(vals_c) == 0: continue
-            stat, p = ranksums(vals_c0, vals_c)
-            print(f"  c0 vs c{c}:  stat={stat:.3f}, p={p:.3g}")
+    # H) Wilcoxon on top-5 features
+    top5 = np.argsort(rf.feature_importances_)[::-1][:5]
+    for f in top5:
+        pretty = NICE_NAME.get(feat_names[f], feat_names[f])
+        v0 = Xv[cat==0, f]
+        for c in (1,2,3):
+            vc = Xv[cat==c, f]
+            if vc.size:
+                s,p = ranksums(v0, vc)
+                print(f"Feat {pretty} c0 vs c{c}: stat={s:.3f}, p={p:.3g}")
 
     return rf
 
-
 # ────────────────────────────────────────────────────────────
-#  MAIN
-# ────────────────────────────────────────────────────────────
+# MAIN
 if __name__=="__main__":
     log("loading final_dataset4.nc …")
     ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset4.nc")
 
-    # compute global veg‐type range (only the VegTyp values that occur anywhere)
-    veg_all = ds["VegTyp"].values.ravel(order='C')
-    GLOBAL_VEGRANGE = np.unique(veg_all[np.isfinite(veg_all)].astype(int))
+    # build veg-range
+    veg_all = ds["VegTyp"].values.ravel(order='C').astype(int)
+    GLOBAL_VEGRANGE = np.unique(veg_all[np.isfinite(veg_all)])
 
-    # cumulative-burn categories (0…3)
-    bc = ds["burn_cumsum"].values  # (year, pixel)
-    cat_2d = np.zeros_like(bc, dtype=int)
-    cat_2d[bc < 0.25]                  = 0
-    cat_2d[(bc >= 0.25) & (bc < 0.50)] = 1
-    cat_2d[(bc >= 0.50) & (bc < 0.75)] = 2
-    cat_2d[bc >= 0.75]                 = 3
-    log("categories (c0..c3) computed")
+    # compute categories
+    bc = ds["burn_cumsum"].values
+    cat2d = np.zeros_like(bc, dtype=int)
+    cat2d[bc < 0.25] = 0
+    cat2d[(bc>=0.25)&(bc<0.50)] = 1
+    cat2d[(bc>=0.50)&(bc<0.75)] = 2
+    cat2d[bc>=0.75] = 3
+    log("categories computed")
 
-    X_all,y_all,feat_names,ok = flatten_nobf(ds,"DOD")
+    # flatten
+    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DOD")
     log("feature matrix ready (burn_fraction excluded)")
 
-    rf_model_nobf = rf_experiment_nobf(X_all,y_all,cat_2d,ok,ds,feat_names)
-    log("ALL DONE (No BF).")
+    # run experiment
+    rf_model = rf_experiment_nobf(X_all, y_all, cat2d, ok, ds, feat_names)
+    log("ALL DONE (Experiment 2).")
