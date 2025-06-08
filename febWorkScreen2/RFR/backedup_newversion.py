@@ -11,6 +11,7 @@ import numpy.random as npr
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 from scipy.stats import ranksums
+from scipy.stats import spearmanr
 import xarray as xr
 
 # ─── scikit-learn ────────────────────────────────────────────
@@ -36,6 +37,7 @@ STATES = gpd.read_file(STATES_SHP).to_crs(epsg=3857)
 # ─── California lon/lat rectangle  (PlateCarree) ─────────────
 CA_LON_W, CA_LON_E = -125.0, -117.0   # west, east
 CA_LAT_S, CA_LAT_N =   37.0,   43.0   # south, north
+GLOBAL_VEGRANGE: np.ndarray = np.array([], dtype=int)
 
 # ────────────────────────────────────────────────────────────
 #  pretty timer
@@ -55,7 +57,7 @@ def plot_scatter(y_true, y_pred, title):
     rmse = np.sqrt(mean_squared_error(y_true,y_pred))
     bias = (y_pred-y_true).mean();  r2 = r2_score(y_true,y_pred)
     plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DoD");  plt.ylabel("Observed DoD");  plt.legend()
+    plt.xlabel("Predicted DSD");  plt.ylabel("Observed DSD");  plt.legend()
     plt.tight_layout();  plt.show()
 
 def plot_bias_hist(y_true, y_pred, title, rng=(-100,300)):
@@ -79,7 +81,7 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title):
     rmse = np.sqrt(mean_squared_error(y_true,y_pred))
     bias = (y_pred-y_true).mean();  r2 = r2_score(y_true,y_pred)
     plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DoD");  plt.ylabel("Observed DoD");  plt.legend()
+    plt.xlabel("Predicted DSD");  plt.ylabel("Observed DSD");  plt.legend()
     plt.tight_layout();  plt.show()
 
 def plot_top10_features(rf, names, title):
@@ -151,7 +153,7 @@ def plot_top5_feature_scatter(rf, X, y, cat, names, prefix):
             plt.plot(mean_x, dod_vals, '-', color=colours[c], alpha=0.7)
 
         plt.xlabel(fname)
-        plt.ylabel("Observed DoD")
+        plt.ylabel("Observed DSD")
         plt.title(f"{prefix}: {fname}")
         plt.legend()
         plt.tight_layout();  plt.show()
@@ -202,7 +204,7 @@ def plot_top5_feature_scatter_binned(
                 continue
 
             # corr for the legend
-            r_val = np.corrcoef(x_all[mask_c], y[mask_c])[0, 1]
+            rho, pval = spearmanr(x_all[mask_c], y[mask_c])
 
             y_mean, y_sd, x_valid = [], [], []
             for i in range(n_bins):
@@ -225,12 +227,12 @@ def plot_top5_feature_scatter_binned(
                          fmt='o', ms=4, lw=1,
                          color=colours[c], ecolor=colours[c],
                          alpha=0.8,
-                         label=f"cat={c} (r={r_val:.2f})")
+                         label=f"cat={c} (ρ={rho:.2f}, p={pval:.2g})")
             plt.plot(x_valid, y_mean, '-', color=colours[c], alpha=0.7)
 
         plt.xlabel(fname)
-        plt.ylabel("Observed DoD")
-        plt.title(f"{prefix} (binned): {fname}")
+        plt.ylabel("Observed DSD")
+        plt.title(f"{prefix}: {fname}")
         plt.legend()
         plt.tight_layout(); plt.show()
 
@@ -250,7 +252,7 @@ def boxplot_dod_by_cat(y_obs, y_pred, cat, title_prefix, fname_base=None):
     axs[1].set_title(f"{title_prefix} – PREDICTED")
     for ax in axs:
         ax.set_xticklabels([f"c{c}" for c in cats]);  ax.set_xlabel("Category")
-    axs[0].set_ylabel("DoD (days)")
+    axs[0].set_ylabel("DSD (days)")
     fig.tight_layout()
     if fname_base:
         fig.savefig(f"{fname_base}.png", dpi=300)
@@ -286,7 +288,7 @@ def transparent_histogram_by_cat(values, cat, title, alpha=0.35,
         if sel.any():
             plt.hist(values[sel], bins=bins, range=rng,
                      alpha=alpha, color=col, label=f"c{c}", density=True)
-    plt.xlabel("DoD (days)")
+    plt.xlabel("DSD (days)")
     plt.ylabel("relative freq.")
     plt.title(title)
     plt.legend()
@@ -391,7 +393,7 @@ def dod_map_ca(ds, pix_idx, values, title,
     sc = ax.scatter(x, y, c=values, cmap=cmap,
                     vmin=vmin, vmax=vmax,
                     s=PIX_SZ, marker="s", transform=merc, zorder=3)
-    plt.colorbar(sc, ax=ax, shrink=.8, label="DoD (days)")
+    plt.colorbar(sc, ax=ax, shrink=.8, label="DSD (days)")
     ax.set_title(title); plt.tight_layout(); plt.show()
 
 def bias_map_ca(ds, pix_idx, y_true, y_pred, title):
@@ -404,7 +406,7 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred, title):
     add_background(ax, CA_EXTENT)                           # ← changed
     ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
                   crs=ccrs.PlateCarree())        # <- NEW, hard clip
-    sc = ax.scatter(x, y, c=bias, cmap="seismic",
+    sc = ax.scatter(x, y, c=bias, cmap="seismic_r",
                     norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
                     s=PIX_SZ, marker="s", transform=merc, zorder=3)
     plt.colorbar(sc, ax=ax, shrink=.8, label="Bias (Pred-Obs, days)")
@@ -426,51 +428,48 @@ def boxplot_dod_by_elev_veg(y, elev, veg, tag):
     plt.boxplot(data, showmeans=True)
     plt.xticks(range(1, len(labels) + 1), labels, rotation=90)
     plt.xlabel("(Elevation bin, VegTyp)")
-    plt.ylabel("Raw DoD")
+    plt.ylabel("Raw DSD")
     plt.title(tag)
     plt.tight_layout()
     plt.show()
 
 def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag,
                           elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500)):
+    bias     = y_pred - y_true
+    elev_bin = np.digitize(elev, elev_edges) - 1
 
-    bias       = y_pred - y_true
-    elev_bin   = np.digitize(elev, elev_edges) - 1
-
-    # ---- fixed VegTyp columns 1 … 23 ----------------------------------
-    veg_range  = np.arange(1, 24)                # 23 columns
-    n_veg      = len(veg_range)
+    # use only the veg‐types that occur anywhere (GLOBAL_VEGRANGE)
+    veg_range = GLOBAL_VEGRANGE
+    n_veg = len(veg_range)
 
     grid = np.full((len(elev_edges)-1, n_veg), np.nan)
 
     for ei in range(len(elev_edges)-1):
-        for vv in veg_range:
-            m = (elev_bin == ei) & (veg.astype(int) == vv)
-            if m.any():
-                grid[ei, vv-1] = np.nanmean(bias[m])   # vv-1 because 0-index
+        for j, vv in enumerate(veg_range):
+            sel = (elev_bin == ei) & (veg.astype(int) == vv)
+            if sel.any():
+                grid[ei, j] = np.nanmean(bias[sel])
 
     plt.figure(figsize=(8,4))
-    im = plt.imshow(grid, cmap='seismic', vmin=-60, vmax=60,
+    im = plt.imshow(grid, cmap='seismic_r', vmin=-60, vmax=60,
                     origin='lower', aspect='auto')
 
-    # --- black border around every cell ---------------------------
     for i in range(grid.shape[0]):
         for j in range(grid.shape[1]):
             plt.gca().add_patch(
                 plt.Rectangle((j-0.5, i-0.5), 1, 1,
-                              ec='black', fc='none', lw=.6)
-            )
-            # value label
+                              ec='black', fc='none', lw=.6))
             if not np.isnan(grid[i, j]):
                 plt.text(j, i, f"{grid[i, j]:.0f}",
-                         ha='center', va='center', fontsize=7, color='k')
+                         ha='center', va='center', fontsize=6, color='k')
 
+    # set xticks only for the kept veg‐types
     plt.xticks(range(n_veg), [f"V{v}" for v in veg_range])
     plt.yticks(range(len(elev_edges)-1),
                [f"{elev_edges[i]}–{elev_edges[i+1]}" for i in range(len(elev_edges)-1)])
     plt.colorbar(im, label="Bias (days)")
-    plt.title(tag)
-    plt.tight_layout();  plt.show()
+    plt.title(tag); plt.tight_layout(); plt.show()
+
 
 
 
@@ -588,10 +587,10 @@ def rf_unburned_experiment(
                     title_prefix="TEST 30 %")
 
     transparent_histogram_by_cat(y_te,     cat_te,
-                                "Observed DoD – TEST 30 %",
+                                "Observed DSD – TEST 30 %",
                                 fname=None)
     transparent_histogram_by_cat(y_hat_te, cat_te,
-                                "Predicted DoD – TEST 30 %",
+                                "Predicted DSD – TEST 30 %",
                                 fname=None)
 
     # box-plots for RF top-5 predictors (full sample, but you could
@@ -612,10 +611,10 @@ def rf_unburned_experiment(
 
     # transparent full-sample observed / predicted histograms
     transparent_histogram_by_cat(Yv,        cat,
-                                "Observed DoD – FULL sample",
+                                "Observed DSD – FULL sample",
                                 fname=None)
     transparent_histogram_by_cat(y_hat_all, cat,
-                                "Predicted DoD – FULL sample",
+                                "Predicted DSD – FULL sample",
                                 fname=None)
 
 
@@ -658,14 +657,14 @@ def rf_unburned_experiment(
             ds,
             pix_valid[m],
             Yv[m],
-            f"Observed DoD – cat {c} (thr={thr})",
+            f"Observed DSD – cat {c} (thr={thr})",
             cmap="Blues",
         )
         dod_map_ca(
             ds,
             pix_valid[m],
             y_hat_all[m],
-            f"Predicted DoD – cat {c} (thr={thr})",
+            f"Predicted DSD – cat {c} (thr={thr})",
             cmap="Blues",
         )
 
@@ -829,10 +828,14 @@ if __name__ == "__main__":
 
     # build feature matrix (burn_fraction excluded)
     X_all, y_all, feat_names, ok = flatten_nobf(ds, "DOD")
+
     log(
         f"feature matrix ready – {ok.sum()} valid samples, "
         f"{len(feat_names)} predictors"
     )
+
+    veg_all = ds["VegTyp"].values.ravel(order='C')[ok].astype(int)
+    GLOBAL_VEGRANGE = np.unique(veg_all)
 
     # ── run #1 : unburned = cat 0 only  ───────────────────────────
     log("\n=== RUN #1 : unburned = cat 0 (cumsum < 0.25) ===")
