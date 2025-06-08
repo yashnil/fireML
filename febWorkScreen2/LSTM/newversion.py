@@ -21,6 +21,17 @@ import cartopy.io.img_tiles as cimgt
 import geopandas as gpd
 
 GLOBAL_VEGRANGE: np.ndarray = np.array([], dtype=int)
+VEG_NAMES = {
+    1:"Urban/Built-Up",    2:"Dry Cropland/Pasture",
+    3:"Irrigated Crop/Pasture",  4:"Mixed Dry/Irrig.", 
+    5:"Crop/Grass Mosaic", 6:"Crop/Wood Mosaic",
+    7:"Grassland", 8:"Shrubland", 9:"Mixed Shrub/Grass",
+   10:"Savanna", 11:"Deciduous Broadleaf",12:"Deciduous Needleleaf",
+   13:"Evergreen Broadleaf",14:"Evergreen Needleleaf",15:"Mixed Forest",
+   16:"Water",17:"Herb. Wetland",18:"Wooded Wetland",19:"Barren",
+   20:"Herb. Tundra",21:"Wooded Tundra",22:"Mixed Tundra",
+   23:"Bare Ground Tundra",24:"Snow/Ice",25:"Playa",26:"Lava",27:"White Sand"
+}
 
 # ────────────────────────────────────────────────────────────
 #  pretty timer
@@ -115,7 +126,7 @@ def dod_map_ca(ds, pix_idx, values, title,
     plt.tight_layout()
     plt.show()
 
-def bias_map_ca(ds, pix_idx, y_true, y_pred, title):
+def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None):
     """
     Plot clipped bias (Pred – Obs) per pixel, using a diverging scale:
     now flipped so positive = blue, negative = red.
@@ -138,7 +149,10 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred, title):
         s=2, marker="s", transform=merc, zorder=3
     )
     plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Pred − Obs, days)")
-    ax.set_title(title)
+    if title is not None:
+        ax.set_title(title)
+    else:
+        pass
     plt.tight_layout()
     plt.show()
 
@@ -166,42 +180,45 @@ def boxplot_dod_by_elev_veg(y, elev, veg, tag):
 
 def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag,
                           elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500)):
-    """
-    Create an Elev×VegTyp grid of mean bias (Pred − Obs), clipped to ±60 days.
-    Now uses GLOBAL_VEGRANGE to drop any veg columns that never occur.
-    """
-    bias      = y_pred - y_true
-    elev_bin  = np.digitize(elev, elev_edges) - 1
-    veg_range = GLOBAL_VEGRANGE
-    n_veg     = len(veg_range)
+    bias     = y_pred - y_true
+    elev_bin = np.digitize(elev, elev_edges) - 1
+    veg_range= GLOBAL_VEGRANGE
+    n_veg    = len(veg_range)
+    grid     = np.full((len(elev_edges)-1, n_veg), np.nan)
 
-    grid = np.full((len(elev_edges)-1, n_veg), np.nan)
     for ei in range(len(elev_edges)-1):
         for j, vv in enumerate(veg_range):
-            sel = (elev_bin == ei) & (veg.astype(int) == vv)
+            sel = (elev_bin==ei) & (veg.astype(int)==vv)
             if sel.any():
-                grid[ei, j] = np.nanmean(bias[sel])
+                grid[ei,j] = np.nanmean(bias[sel])
 
     plt.figure(figsize=(8,4))
-    im = plt.imshow(
-        grid, cmap='seismic_r', vmin=-60, vmax=60,
-        origin='lower', aspect='auto'
-    )
+    im = plt.imshow(grid, cmap='seismic_r', vmin=-60, vmax=60,
+                    origin='lower', aspect='auto')
+
+    # draw grid and text
+    ax = plt.gca()
     for i in range(grid.shape[0]):
         for j in range(grid.shape[1]):
-            plt.gca().add_patch(
-                plt.Rectangle((j-0.5, i-0.5), 1, 1,
-                              ec='black', fc='none', lw=0.6)
+            ax.add_patch(
+                plt.Rectangle((j-0.5,i-0.5),1,1, ec='black', fc='none', lw=0.6)
             )
-            if not np.isnan(grid[i, j]):
-                plt.text(j, i, f"{grid[i, j]:.0f}",
-                         ha='center', va='center', fontsize=6, color='k')
+            if not np.isnan(grid[i,j]):
+                ax.text(j, i, f"{grid[i,j]:.0f}",
+                        ha='center', va='center', fontsize=6, color='k')
 
-    plt.xticks(range(n_veg), [f"V{v}" for v in veg_range])
+    # human‐readable VegTyp on x
+    plt.xticks(range(n_veg),
+               [VEG_NAMES[v] for v in veg_range],
+               rotation=45, ha='right')
+
+    # append “ m” to each elevation bin label on y
     plt.yticks(range(len(elev_edges)-1),
-               [f"{elev_edges[i]}–{elev_edges[i+1]}" for i in range(len(elev_edges)-1)])
+               [f"{elev_edges[i]}–{elev_edges[i+1]} m"
+                for i in range(len(elev_edges)-1)])
+
     plt.colorbar(im, label="Bias (days)")
-    plt.title(tag)
+    # no title here
     plt.tight_layout()
     plt.show()
 
@@ -209,25 +226,43 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag,
 #  plotting helpers  (scatter / bias-hist / feature plots)
 # ────────────────────────────────────────────────────────────
 
-def plot_scatter(y_true, y_pred, title):
+def plot_scatter(y_true, y_pred, title=None):
     plt.figure(figsize=(6,6))
     plt.scatter(y_pred, y_true, alpha=0.3, label=f"N={len(y_true)}")
-    mn, mx = min(y_pred.min(), y_true.min()), max(y_pred.max(), y_true.max())
+    mn, mx = (min(y_pred.min(), y_true.min()), 
+              max(y_pred.max(), y_true.max()))
     plt.plot([mn,mx],[mn,mx],'k--', label="1:1 line")
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    bias = (y_pred - y_true).mean();  r2 = r2_score(y_true, y_pred)
-    plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DSD");  plt.ylabel("Observed DSD");  plt.legend()
-    plt.tight_layout();  plt.show()
+    bias = (y_pred - y_true).mean()
+    # Only draw a title if one was passed in
+    if title is not None:
+        plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}")
+    plt.xlabel("Predicted DSD (days)")
+    plt.ylabel("Observed DSD (days)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
 
-def plot_bias_hist(y_true, y_pred, title, rng=(-100,300)):
+def plot_bias_hist(y_true, y_pred, title=None, rng=(-100,300)):
     res = y_pred - y_true
-    plt.figure(figsize=(6,4))
-    plt.hist(res, bins=50, range=rng, alpha=0.7)
-    plt.axvline(res.mean(), color='k', ls='--', lw=2)
-    plt.title(f"{title}\nMean={res.mean():.2f}, Std={res.std():.2f}")
-    plt.xlabel("Bias (Pred-Obs)");  plt.ylabel("Count")
-    plt.tight_layout();  plt.show()
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.hist(res, bins=50, range=rng, alpha=0.7)
+    ax.axvline(res.mean(), color='k', ls='--', lw=2)
+    # Big N label
+    ax.text(0.02, 0.95, f"N={len(y_true)}",
+            transform=ax.transAxes, fontsize=14, va='top')
+    # Compute R²
+    r2 = r2_score(y_true, y_pred)
+    # Build title
+    stats = f"Mean={res.mean():.2f}, Std={res.std():.2f}, R²={r2:.2f}"
+    if title:
+        ax.set_title(f"{title}\n{stats}")
+    else:
+        ax.set_title(stats)
+    ax.set_xlabel("Bias (Pred − Obs, days)")
+    ax.set_ylabel("Count")
+    plt.tight_layout()
+    plt.show()
 
 def plot_scatter_by_cat(y_true, y_pred, cat, title):
     plt.figure(figsize=(6,6))
@@ -303,44 +338,41 @@ def plot_top5_feature_scatter(imp, X, y, cat, names, prefix):
         plt.tight_layout()
         plt.show()
 
-def plot_top5_feature_scatter_binned(imp, X, y, cat, names, prefix, n_bins: int = 20):
-    """
-    Like plot_top5_feature_scatter, but bins each feature’s range into n_bins,
-    and for each bin & category draws mean ±1 SD. Uses Spearman ρ + p-value in the legend.
-    """
-    top5 = np.argsort(imp)[::-1][:5]
-    colours = {0: 'red', 1: 'yellow', 2: 'green', 3: 'blue'}
-    cats = [0,1,2,3]
+def plot_top5_feature_scatter_binned(imp, X, y, cat, names,
+                                     prefix, n_bins: int = 20):
+    top5    = np.argsort(imp)[::-1][:5]
+    colours = {0:'red',1:'yellow',2:'green',3:'blue'}
+    cats    = [0,1,2,3]
 
     for f_idx in top5:
         fname = names[f_idx]
         x_all = X[:, f_idx]
-
-        # uniform bin edges + centres
-        edges = np.linspace(x_all.min(), x_all.max(), n_bins+1)
-        centres = 0.5*(edges[:-1] + edges[1:])
+        edges  = np.linspace(x_all.min(), x_all.max(), n_bins+1)
+        centres= 0.5*(edges[:-1] + edges[1:])
 
         plt.figure(figsize=(7,5))
         for c in cats:
             mask_c = (cat == c)
-            if not mask_c.any():
-                continue
+            if not mask_c.any(): continue
 
-            # Spearman rho + p-value
             rho, pval = spearmanr(x_all[mask_c], y[mask_c])
+            # conditional p-value formatting
+            if pval == 0:
+                p_label = "0"
+            elif pval < 0.01:
+                p_label = "<0.01"
+            else:
+                p_label = f"{pval:.2g}"
 
             y_mean, y_sd, x_valid = [], [], []
             for i in range(n_bins):
-                m_bin = mask_c & (x_all >= edges[i]) & (x_all < edges[i+1])
-                if not m_bin.any():
-                    continue
-                y_mean.append(y[m_bin].mean())
-                y_sd.append(y[m_bin].std(ddof=0))
+                m = mask_c & (x_all >= edges[i]) & (x_all < edges[i+1])
+                if not m.any(): continue
+                y_mean.append(y[m].mean())
+                y_sd  .append(y[m].std(ddof=0))
                 x_valid.append(centres[i])
 
-            if len(x_valid)==0:
-                continue
-
+            if not x_valid: continue
             x_valid = np.array(x_valid)
             y_mean  = np.array(y_mean)
             y_sd    = np.array(y_sd)
@@ -351,12 +383,12 @@ def plot_top5_feature_scatter_binned(imp, X, y, cat, names, prefix, n_bins: int 
                 fmt='o', ms=4, lw=1,
                 color=colours[c], ecolor=colours[c],
                 alpha=0.8,
-                label=f"cat={c} (ρ={rho:.2f}, p={pval:.2g})"
+                label=f"cat={c} (ρ={rho:.2f}, p={p_label})"
             )
             plt.plot(x_valid, y_mean, '-', color=colours[c], alpha=0.7)
 
         plt.xlabel(fname)
-        plt.ylabel("Observed DSD")
+        plt.ylabel("Observed DSD (days)")
         plt.title(f"{prefix}: {fname}")
         plt.legend()
         plt.tight_layout()
@@ -490,7 +522,7 @@ def lstm_unburned_experiment(X, y, cat2d, ok, ds, feat_names,
     pix_valid = pix_full[ok]    # only rows where ok == True
 
     # overall pixel-bias map
-    bias_map_ca(ds, pix_valid, Yv, yhat_all, f"Pixel Bias: ALL data (thr={thr})")
+    bias_map_ca(ds, pix_valid, Yv, yhat_all, title=None)
 
     # per-category pixel-bias maps & Elev×Veg bias grids
     for c in range(4):
@@ -504,7 +536,7 @@ def lstm_unburned_experiment(X, y, cat2d, ok, ds, feat_names,
             pix_valid[m],
             Yv[m],
             yhat_all[m],
-            f"Pixel Bias – cat {c} (thr={thr})"
+            title=None
         )
 
         # Elevation & VegTyp vectors for this category
@@ -524,11 +556,20 @@ def lstm_unburned_experiment(X, y, cat2d, ok, ds, feat_names,
     bias = yhat_all - Yv
     bias_by_cat = {c:bias[cat==c] for c in range(4) if (cat==c).any()}
     for c in range(4):
-        m = cat == c
-        if m.any():
-            plot_scatter(Yv[m], yhat_all[m], f"Category {c} (thr={thr})")
-            plot_bias_hist(Yv[m], yhat_all[m],
-                           f"Bias Hist: cat={c} (thr={thr})")
+        m = (cat == c)
+        if not m.any(): 
+            continue
+
+        # scatter without title
+        plot_scatter(
+            Yv[m], yhat_all[m],
+            title=None
+        )
+        # bias-hist only shows Mean/Std/R² + N
+        plot_bias_hist(
+            Yv[m], yhat_all[m],
+            title=None
+        )
     if 0 in bias_by_cat:
         print("\nWilcoxon rank-sum (bias difference vs cat 0)")
         for c in (1,2,3):
