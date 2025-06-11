@@ -75,8 +75,8 @@ def plot_scatter(y_true, y_pred, title=None):
         r2   = r2_score(y_true, y_pred)
         ax.set_title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.2f}",
                      fontsize=FONT_LABEL)
-    ax.set_xlabel("Predicted DSD (Days)", fontsize=FONT_LABEL)
-    ax.set_ylabel("Observed DSD (Days)", fontsize=FONT_LABEL)
+    ax.set_xlabel("Predicted DSD", fontsize=FONT_LABEL)
+    ax.set_ylabel("Observed DSD", fontsize=FONT_LABEL)
     ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout(); plt.show()
 
@@ -111,8 +111,8 @@ def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx, gridsize=80):
     ax.set_xlim(mn-pad, mx+pad); ax.set_ylim(mn-pad, mx+pad)
     ax.set_aspect('equal','box')
     ticks = ax.get_yticks(); ax.set_xticks(ticks)
-    ax.set_xlabel("Predicted DSD (Days)", fontsize=FONT_LABEL)
-    ax.set_ylabel("Observed DSD (Days)", fontsize=FONT_LABEL)
+    ax.set_xlabel("Predicted DSD", fontsize=FONT_LABEL)
+    ax.set_ylabel("Observed DSD", fontsize=FONT_LABEL)
     ax.tick_params(labelsize=FONT_TICK)
     cbar = fig.colorbar(hb, ax=ax, shrink=0.8, label="Counts")
     cbar.ax.tick_params(labelsize=FONT_TICK)
@@ -160,16 +160,28 @@ def dod_map_ca(ds, pix_idx, values, cmap="Blues", vmin=50, vmax=250):
     plt.tight_layout(); plt.show()
 
 def bias_map_ca(ds, pix_idx, y_true, y_pred):
-    lat = ds["latitude"].values.ravel(); lon = ds["longitude"].values.ravel()
-    x,y = merc.transform_points(ccrs.Geodetic(), lon[pix_idx], lat[pix_idx])[:,:2].T
-    bias = np.clip(y_pred-y_true, -60,60)
+    """
+    Plot clipped bias (Pred – Obs) per pixel, using a diverging scale.
+    Colorbar label now uses FONT_LABEL.
+    """
+    lat = ds["latitude"].values.ravel()
+    lon = ds["longitude"].values.ravel()
+    x, y = merc.transform_points(ccrs.Geodetic(), lon[pix_idx], lat[pix_idx])[:,:2].T
+
+    bias = np.clip(y_pred - y_true, -60, 60)
     fig, ax = plt.subplots(subplot_kw={"projection":merc}, figsize=(6,5))
     _add_background(ax)
-    sc = ax.scatter(x, y, c=bias, cmap="seismic_r",
-                    norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
-                    s=1, marker="s", transform=merc, zorder=3)
-    plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Days)")
-    plt.tight_layout(); plt.show()
+    sc = ax.scatter(
+        x, y, c=bias,
+        cmap="seismic_r",
+        norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
+        s=1, marker="s", transform=merc, zorder=3
+    )
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.8)
+    cbar.ax.tick_params(labelsize=FONT_TICK)
+    cbar.set_label("Bias (Days)", fontsize=FONT_LABEL)
+    plt.tight_layout()
+    plt.show()
 
 # ─── ELEV×VEG PLOTS ────────────────────────────────────────────
 def boxplot_dod_by_elev_veg(y, elev, veg):
@@ -189,31 +201,43 @@ def boxplot_dod_by_elev_veg(y, elev, veg):
     plt.tight_layout(); plt.show()
 
 def heat_bias_by_elev_veg(y_true, y_pred, elev, veg):
-    bias = y_pred - y_true
+    """
+    Elev×Veg bias grid with a colorbar whose label uses FONT_LABEL.
+    """
     edges = [500,1000,1500,2000,2500,3000,3500,4000,4500]
     elev_bin = np.digitize(elev, edges) - 1
-    n_e = len(edges)-1; n_v = len(GLOBAL_VEGRANGE)
-    grid = np.full((n_e,n_v), np.nan)
-    for i in range(n_e):
-        for j,v in enumerate(GLOBAL_VEGRANGE):
-            sel = (elev_bin==i)&(veg==v)
-            if sel.any(): grid[i,j] = bias[sel].mean()
+    vrange = GLOBAL_VEGRANGE
+    grid = np.full((len(edges)-1, len(vrange)), np.nan)
+
+    for i in range(len(edges)-1):
+        for j, v in enumerate(vrange):
+            sel = (elev_bin == i) & (veg == v)
+            if sel.any():
+                grid[i,j] = np.nanmean((y_pred - y_true)[sel])
+
     fig, ax = plt.subplots(figsize=(8,4))
     im = ax.imshow(grid, cmap='seismic_r', vmin=-60, vmax=60,
                    origin='lower', aspect='auto')
-    for i in range(n_e):
-        for j in range(n_v):
-            ax.add_patch(plt.Rectangle((j-0.5,i-0.5),1,1, ec='black', fc='none', lw=0.6))
+    for i in range(grid.shape[0]):
+        for j in range(grid.shape[1]):
+            ax.add_patch(plt.Rectangle((j-0.5, i-0.5), 1, 1,
+                                       ec='black', fc='none', lw=0.6))
             if not np.isnan(grid[i,j]):
-                ax.text(j, i, f"{grid[i,j]:.0f}", ha='center', va='center', fontsize=6)
-    ax.set_xticks(range(n_v))
-    ax.set_xticklabels([VEG_NAMES[v] for v in GLOBAL_VEGRANGE],
+                ax.text(j, i, f"{grid[i,j]:.0f}",
+                        ha='center', va='center', fontsize=FONT_LABEL)
+    ax.set_xticks(range(len(vrange)))
+    ax.set_xticklabels([VEG_NAMES[v] for v in vrange],
                        rotation=45, ha='right', fontsize=FONT_TICK)
-    ax.set_yticks(range(n_e))
-    ax.set_yticklabels([f"{edges[i]}–{edges[i+1]} m" for i in range(n_e)],
+    ax.set_yticks(range(len(edges)-1))
+    ax.set_yticklabels([f"{edges[i]}–{edges[i+1]} m" for i in range(len(edges)-1)],
                        fontsize=FONT_TICK)
-    plt.colorbar(im, ax=ax, label="Bias (Days)")
-    plt.tight_layout(); plt.show()
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.ax.tick_params(labelsize=FONT_TICK)
+    cbar.set_label("Bias (Days)", fontsize=FONT_LABEL)
+
+    plt.tight_layout()
+    plt.show()
 
 # ─── FEATURE‐MATRIX HELPERS ─────────────────────────────────────
 def gather_features_nobf(ds, target="DOD"):
