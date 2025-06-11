@@ -125,7 +125,7 @@ def plot_bias_hist(y_true, y_pred, title=None, rng=(-100,300)):
     mean,std,r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
     ax.set_title(f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}",
                  fontsize=FONT_LABEL)
-    ax.set_xlabel("Bias (days)", fontsize=FONT_LABEL)
+    ax.set_xlabel("Bias (Pred − Obs, Days)", fontsize=FONT_LABEL)
     ax.set_ylabel("Count",       fontsize=FONT_LABEL)
     ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout(); plt.show()
@@ -157,7 +157,7 @@ def dod_map_ca(ds, pix_idx, values,
     sc = ax.scatter(x, y, c=values,
                     cmap=cmap, vmin=vmin, vmax=vmax,
                     s=1, marker="s", transform=merc, zorder=3)
-    cbar = fig.colorbar(sc, ax=ax, shrink=0.8, label="DSD (days)")
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.8, label="DSD (Days)")
     cbar.ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout(); plt.show()
 
@@ -173,9 +173,12 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred):
                     cmap="seismic_r",
                     norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
                     s=1, marker="s", transform=merc, zorder=3)
-    cbar = fig.colorbar(sc, ax=ax, shrink=0.8, label="Bias (days)")
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.8)
     cbar.ax.tick_params(labelsize=FONT_TICK)
-    plt.tight_layout(); plt.show()
+    # make the colorbar label the same size as RF:
+    cbar.set_label("Bias (Days)", fontsize=FONT_LABEL)
+    plt.tight_layout()
+    plt.show()
 
 # ─── ELEV×VEG PLOTS ────────────────────────────────────────────
 def boxplot_dod_by_elev_veg(y, elev, veg):
@@ -191,7 +194,7 @@ def boxplot_dod_by_elev_veg(y, elev, veg):
     ax.boxplot(data, showmeans=True)
     ax.set_xticklabels(labels, rotation=90, fontsize=FONT_TICK)
     ax.set_xlabel("(Elevation bin, VegType)", fontsize=FONT_LABEL)
-    ax.set_ylabel("DSD (days)",              fontsize=FONT_LABEL)
+    ax.set_ylabel("DSD (Days)",              fontsize=FONT_LABEL)
     plt.tight_layout(); plt.show()
 
 def heat_bias_by_elev_veg(y_true, y_pred, elev, veg):
@@ -221,7 +224,10 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg):
     ax.set_yticklabels([f"{edges[i]}–{edges[i+1]} m"
                         for i in range(len(edges)-1)],
                        fontsize=FONT_TICK)
-    plt.colorbar(im, ax=ax, label="Bias (days)")
+    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
+    cbar.ax.tick_params(labelsize=FONT_TICK)
+    # again use FONT_LABEL here
+    cbar.set_label("Bias (Days)", fontsize=FONT_LABEL)
     plt.tight_layout()
     plt.show()
 

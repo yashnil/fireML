@@ -75,8 +75,8 @@ def plot_scatter(y_true, y_pred, title=None):
         r2   = r2_score(y_true, y_pred)
         ax.set_title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.2f}",
                      fontsize=FONT_LABEL)
-    ax.set_xlabel("Predicted DSD (days)", fontsize=FONT_LABEL)
-    ax.set_ylabel("Observed DSD (days)", fontsize=FONT_LABEL)
+    ax.set_xlabel("Predicted DSD (Days)", fontsize=FONT_LABEL)
+    ax.set_ylabel("Observed DSD (Days)", fontsize=FONT_LABEL)
     ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout(); plt.show()
 
@@ -95,8 +95,8 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
         bias = (y_pred-y_true).mean(); r2 = r2_score(y_true, y_pred)
         ax.set_title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.2f}",
                      fontsize=FONT_LABEL)
-    ax.set_xlabel("Predicted DSD (days)", fontsize=FONT_LABEL)
-    ax.set_ylabel("Observed DSD (days)", fontsize=FONT_LABEL)
+    ax.set_xlabel("Predicted DSD (Days)", fontsize=FONT_LABEL)
+    ax.set_ylabel("Observed DSD (Days)", fontsize=FONT_LABEL)
     ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout(); plt.show()
 
@@ -111,8 +111,8 @@ def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx, gridsize=80):
     ax.set_xlim(mn-pad, mx+pad); ax.set_ylim(mn-pad, mx+pad)
     ax.set_aspect('equal','box')
     ticks = ax.get_yticks(); ax.set_xticks(ticks)
-    ax.set_xlabel("Predicted DSD (days)", fontsize=FONT_LABEL)
-    ax.set_ylabel("Observed DSD (days)", fontsize=FONT_LABEL)
+    ax.set_xlabel("Predicted DSD (Days)", fontsize=FONT_LABEL)
+    ax.set_ylabel("Observed DSD (Days)", fontsize=FONT_LABEL)
     ax.tick_params(labelsize=FONT_TICK)
     cbar = fig.colorbar(hb, ax=ax, shrink=0.8, label="Counts")
     cbar.ax.tick_params(labelsize=FONT_TICK)
@@ -128,7 +128,7 @@ def plot_bias_hist(y_true, y_pred, title=None, rng=(-100,300)):
     mean,std,r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
     ax.set_title(f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}",
                  fontsize=FONT_LABEL)
-    ax.set_xlabel("Bias (days)", fontsize=FONT_LABEL)
+    ax.set_xlabel("Bias (Pred − Obs, Days)", fontsize=FONT_LABEL)
     ax.set_ylabel("Count",       fontsize=FONT_LABEL)
     ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout(); plt.show()
@@ -156,7 +156,7 @@ def dod_map_ca(ds, pix_idx, values, cmap="Blues", vmin=50, vmax=250):
     _add_background(ax)
     sc = ax.scatter(x, y, c=values, cmap=cmap, vmin=vmin, vmax=vmax,
                     s=1, marker="s", transform=merc, zorder=3)
-    plt.colorbar(sc, ax=ax, shrink=0.8, label="DSD (days)")
+    plt.colorbar(sc, ax=ax, shrink=0.8, label="DSD (Days)")
     plt.tight_layout(); plt.show()
 
 def bias_map_ca(ds, pix_idx, y_true, y_pred):
@@ -168,7 +168,7 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred):
     sc = ax.scatter(x, y, c=bias, cmap="seismic_r",
                     norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
                     s=1, marker="s", transform=merc, zorder=3)
-    plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (days)")
+    plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Days)")
     plt.tight_layout(); plt.show()
 
 # ─── ELEV×VEG PLOTS ────────────────────────────────────────────
@@ -185,7 +185,7 @@ def boxplot_dod_by_elev_veg(y, elev, veg):
     ax.boxplot(data, showmeans=True)
     ax.set_xticklabels(labels, rotation=90, fontsize=FONT_TICK)
     ax.set_xlabel("(Elevation bin, VegType)", fontsize=FONT_LABEL)
-    ax.set_ylabel("DSD (days)",              fontsize=FONT_LABEL)
+    ax.set_ylabel("DSD (Days)",              fontsize=FONT_LABEL)
     plt.tight_layout(); plt.show()
 
 def heat_bias_by_elev_veg(y_true, y_pred, elev, veg):
@@ -212,7 +212,7 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg):
     ax.set_yticks(range(n_e))
     ax.set_yticklabels([f"{edges[i]}–{edges[i+1]} m" for i in range(n_e)],
                        fontsize=FONT_TICK)
-    plt.colorbar(im, ax=ax, label="Bias (days)")
+    plt.colorbar(im, ax=ax, label="Bias (Days)")
     plt.tight_layout(); plt.show()
 
 # ─── FEATURE‐MATRIX HELPERS ─────────────────────────────────────
