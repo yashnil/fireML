@@ -270,22 +270,11 @@ def add_background(ax, zoom=6):
     if USE_SAT:
         try:
             ax.add_image(TILER, zoom, interpolation="nearest")
-        except Exception as e:
-            print("⚠︎ satellite tiles skipped:", e)
+        except Exception:
             ax.add_feature(_RELIEF, zorder=0)
     else:
         ax.add_feature(_RELIEF, zorder=0)
-
-    # state borders
-    states_shp = "data/cb_2022_us_state_500k/cb_2022_us_state_500k.shp"
-    _states = gpd.read_file(states_shp).to_crs(epsg=4326)
-    _states.boundary.plot(
-        ax=ax,
-        linewidth=0.6,
-        edgecolor="black",
-        zorder=2,
-        transform=ccrs.PlateCarree()
-    )
+    STATES.boundary.plot(ax=ax, linewidth=0.6, edgecolor="black", zorder=2)
 
 def dod_map_ca(ds, pix_idx, values, title=None,
                cmap="Blues", vmin=50, vmax=250):
@@ -294,7 +283,7 @@ def dod_map_ca(ds, pix_idx, values, title=None,
     lon = ds["longitude"].values.ravel()
     x,y = merc.transform_points(ccrs.Geodetic(), lon[pix_idx], lat[pix_idx])[:,:2].T
     fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
-    add_background(ax, CA_EXTENT, zoom=6)
+    add_background(ax, zoom=6)
     ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
                   crs=ccrs.PlateCarree())
     sc = ax.scatter(x, y, c=values, cmap=cmap, vmin=vmin, vmax=vmax,
@@ -312,7 +301,7 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None):
     x,y = merc.transform_points(ccrs.Geodetic(), lon[pix_idx], lat[pix_idx])[:,:2].T
     bias = np.clip(y_pred - y_true, -60, 60)
     fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
-    add_background(ax, CA_EXTENT, zoom=6)
+    add_background(ax, zoom=6)
     ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
                   crs=ccrs.PlateCarree())
     sc = ax.scatter(x, y, c=bias, cmap="seismic_r",
@@ -479,7 +468,7 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names):
         if not m.any(): continue
         elev = ds["Elevation"].values.ravel(order='C')[ok][te_idx][m]
         veg  = ds["VegTyp"]   .values.ravel(order='C')[ok][te_idx][m].astype(int)
-        heat_bias_by_elev_veg(y_te[m], yhat_te[m], elev, veg, title=None)
+        heat_bias_by_elev_veg(y_te[m], yhat_te[m], elev, veg, tag=None)
 
     # D) feature importance
     plot_top10_features(rf, feat_names)

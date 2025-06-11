@@ -1,651 +1,521 @@
-#!/usr/bin/env python3
+import time
+import requests
 import xarray as xr
 import numpy as np
+import numpy.random as npr
 import matplotlib.pyplot as plt
-
+from matplotlib.colors import TwoSlopeNorm
+from scipy.stats import ranksums, spearmanr
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.inspection import permutation_importance
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.io.img_tiles as cimgt
+import geopandas as gpd
+from typing import List, Dict
 
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_squared_error, r2_score
+# ────────────────────────────────────────────────────────────
+PIX_SZ = 2
+CA_LON_W, CA_LON_E = -125.0, -117.0
+CA_LAT_S, CA_LAT_N =   37.0,   43.0
 
-from scipy.stats import ranksums  # for Wilcoxon rank-sum tests
-import numpy.random as npr  # for random sampling in the final new step
-from typing import List, Tuple, Optional
+# placeholder for veg types that actually occur
+GLOBAL_VEGRANGE: np.ndarray = np.array([], dtype=int)
+VEG_NAMES = {
+    1:"Urban/Built-Up", 2:"Dry Cropland/Pasture", 3:"Irrigated Crop/Pasture",
+    4:"Mixed Dry/Irrig.", 5:"Crop/Grass Mosaic", 6:"Crop/Wood Mosaic",
+    7:"Grassland", 8:"Shrubland", 9:"Mixed Shrub/Grass",10:"Savanna",
+    11:"Deciduous Broadleaf",12:"Deciduous Needleleaf",13:"Evergreen Broadleaf",
+    14:"Evergreen Needleleaf",15:"Mixed Forest",16:"Water",
+    17:"Herb. Wetland",18:"Wooded Wetland",19:"Barren",20:"Herb. Tundra",
+    21:"Wooded Tundra",22:"Mixed Tundra",23:"Bare Ground Tundra",
+    24:"Snow/Ice",25:"Playa",26:"Lava",27:"White Sand"
+}
 
-############################################################
-# 0) LOAD COORDINATES
-############################################################
-from obtainCoordinates import coords  # shape(n_pixels, 2)
+STATES_SHP = "data/cb_2022_us_state_500k/cb_2022_us_state_500k.shp"
+STATES = gpd.read_file(STATES_SHP).to_crs(epsg=3857)
 
-############################################################
-# 1) Pre-2004 Burn
-############################################################
-def compute_pre2004_burn(coords, path_pattern, year_start=2001, year_end=2003):
-    """
-    Summation from 2001..2003 for each pixel bounding box.
-    """
-    import xarray as xr
-    n_pixels = len(coords)
-    pre_burn = np.zeros((n_pixels,), dtype=np.float32)
+# ────────────────────────────────────────────────────────────
+#  Human‐readable feature names
+# ────────────────────────────────────────────────────────────
+NICE_NAME = {}
+for season in ("Fall","Winter","Spring","Summer"):
+    for feat in ("Temperature","Precipitation","Humidity","Shortwave","Longwave"):
+        key = f"aorc{season}{feat}"
+        arrow = "↓" if feat=="Shortwave" else ""
+        NICE_NAME[key] = f"{season} {feat}{arrow}"
+NICE_NAME["peakValue"]      = "Peak SWE"
+NICE_NAME["Elevation"]      = "Elevation (m)"
+NICE_NAME["slope"]          = "Slope"
+NICE_NAME["aspect_ratio"]   = "Aspect Ratio"
+NICE_NAME["VegTyp"]         = "Vegetation Type"
+NICE_NAME["sweWinter"]      = "Winter SWE"
+NICE_NAME["burn_fraction"]  = "Burn Fraction"
 
-    years = range(year_start, year_end + 1)
-    months = range(1, 13)
+# ────────────────────────────────────────────────────────────
+# 0) Timer
+T0 = time.time()
+def log(msg: str) -> None:
+    print(f"[{time.time()-T0:7.1f}s] {msg}", flush=True)
 
-    for yr in years:
-        for mm in months:
-            file_path = path_pattern.format(year=yr, month=mm)
-            ds_nc = xr.open_dataset(file_path)
-            burn_2d = ds_nc["MTBS_BurnFraction"].values
-            lat_2d = ds_nc["XLAT_M"].values
-            lon_2d = ds_nc["XLONG_M"].values
+# ────────────────────────────────────────────────────────────
+# 1) Basic plotting helpers
 
-            # Flatten
-            flat_burn = burn_2d.ravel()
-            flat_lat  = lat_2d.ravel()
-            flat_lon  = lon_2d.ravel()
-
-            # Clamp fraction > 1 => 1
-            flat_burn = np.minimum(flat_burn, 1.0)
-
-            # Remove NaNs
-            valid_mask = np.isfinite(flat_burn) & np.isfinite(flat_lat) & np.isfinite(flat_lon)
-            fb  = flat_burn[valid_mask]
-            fla = flat_lat[valid_mask]
-            flo = flat_lon[valid_mask]
-
-            # Accumulate for each pixel bounding box
-            for i, (coord_lat, coord_lon) in enumerate(coords):
-                lat_min, lat_max = coord_lat - 0.005, coord_lat + 0.005
-                lon_min, lon_max = coord_lon - 0.005, coord_lon + 0.005
-                in_box = ((fla >= lat_min) & (fla <= lat_max) &
-                          (flo >= lon_min) & (flo <= lon_max))
-                box_burn = fb[in_box]
-                mean_frac = np.mean(box_burn) if len(box_burn) > 0 else 0.0
-                pre_burn[i] += mean_frac
-
-            ds_nc.close()
-
-    # final clamp => <= 1.0
-    pre_burn = np.minimum(pre_burn, 1.0)
-    return pre_burn
-
-############################################################
-# 2) cumsum with initial
-############################################################
-def compute_burn_cumsum_with_initial(ds, pre_burn):
-    """
-    ds["burn_fraction"] => shape (year=15, pixel).
-    Add pre_burn to year=0, then cumsum across years.
-    """
-    burn_2d = ds["burn_fraction"].values
-    n_years, n_pixels = burn_2d.shape
-    cumsum_2d = np.zeros((n_years, n_pixels), dtype=np.float32)
-
-    cumsum_2d[0, :] = pre_burn + burn_2d[0, :]
-    for y in range(1, n_years):
-        cumsum_2d[y, :] = cumsum_2d[y - 1, :] + burn_2d[y, :]
-
-    return cumsum_2d
-
-############################################################
-# 3) Gather features (including burn_fraction)
-############################################################
-def gather_spatiotemporal_features(ds, target_var="DOD"):
-    """
-    Collect all data_vars except the target, lat/lon placeholders, etc.
-    We keep 'burn_fraction' as a predictor.
-    """
-    exclude_vars = {
-        target_var.lower(),
-        'lat', 'lon', 'latitude', 'longitude',
-        'pixel', 'year', 'ncoords_vector', 'nyears_vector'
-    }
-    all_feats = {}
-    n_years = ds.dims['year']
-
-    for var_name in ds.data_vars:
-        if var_name.lower() in exclude_vars:
-            continue
-        
-        da = ds[var_name]
-        dims = set(da.dims)
-        # If it's (year, pixel), keep as is
-        if dims == {'year', 'pixel'}:
-            arr2d = da.values
-            all_feats[var_name] = arr2d
-        # If it's (pixel), replicate across all years
-        elif dims == {'pixel'}:
-            arr1d = da.values
-            arr2d = np.tile(arr1d, (n_years,1))
-            all_feats[var_name] = arr2d
-
-    return all_feats
-
-def flatten_spatiotemporal(ds, target_var="DOD"):
-    feat_dict = gather_spatiotemporal_features(ds, target_var=target_var)
-    feat_names = sorted(feat_dict.keys())
-
-    X_cols = []
-    for fname in feat_names:
-        arr2d = feat_dict[fname]
-        arr1d = arr2d.ravel(order='C')
-        X_cols.append(arr1d)
-    X_all = np.column_stack(X_cols)
-
-    dod_2d = ds[target_var].values
-    y_all = dod_2d.ravel(order='C')
-
-    valid_mask = (
-        ~np.isnan(X_all).any(axis=1) &
-        ~np.isnan(y_all)
-    )
-
-    return X_all, y_all, feat_names, valid_mask
-
-############################################################
-# 4) define 4 categories c0..c3 from cumsum_2d
-############################################################
-def define_4cats_cumsum(cumsum_2d):
-    cat_2d = np.zeros(cumsum_2d.shape, dtype=int)
-    c0 = cumsum_2d < 0.25
-    c1 = (cumsum_2d >= 0.25) & (cumsum_2d < 0.5)
-    c2 = (cumsum_2d >= 0.5) & (cumsum_2d < 0.75)
-    c3 = (cumsum_2d >= 0.75)
-    cat_2d[c0] = 0
-    cat_2d[c1] = 1
-    cat_2d[c2] = 2
-    cat_2d[c3] = 3
-    return cat_2d
-
-############################################################
-# 5) Some plotting tools for scatter, hist, etc.
-############################################################
-def plot_scatter(y_true, y_pred, title="Scatter"):
+def plot_scatter(y_true, y_pred, title=None):
+    """Scatter w/ 1:1 line; no legend/title if title=None."""
     plt.figure(figsize=(6,6))
-    plt.scatter(y_pred, y_true, alpha=0.3, label=f"N={len(y_true)}")
-    mn = min(y_pred.min(), y_true.min())
-    mx = max(y_pred.max(), y_true.max())
-    plt.plot([mn,mx],[mn,mx],'k--', label='1:1 line')
-
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    bias = np.mean(y_pred - y_true)
-    r2   = r2_score(y_true, y_pred)
-
-    plt.title(f"{title}\nRMSE={rmse:.2f}, Bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DoD")
-    plt.ylabel("Observed DoD")
-    plt.legend()
+    plt.scatter(y_pred, y_true, alpha=0.3)
+    mn, mx = min(y_pred.min(), y_true.min()), max(y_pred.max(), y_true.max())
+    plt.plot([mn,mx],[mn,mx],'k--')
+    if title is not None:
+        rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+        bias = (y_pred-y_true).mean()
+        r2   = r2_score(y_true, y_pred)
+        plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
+    plt.xlabel("Predicted DSD")
+    plt.ylabel("Observed DSD")
     plt.tight_layout()
     plt.show()
 
-def plot_bias_hist(y_true, y_pred, title="Bias Histogram", x_min=-100, x_max=100):
-    residuals = y_pred - y_true
-    plt.figure(figsize=(6,4))
-    plt.hist(residuals, bins=50, range=(x_min,x_max), alpha=0.7)
-
-    mean_bias = np.mean(residuals)
-    std_bias  = np.std(residuals)
-
-    plt.axvline(mean_bias, color='k', linestyle='dashed', linewidth=2)
-    plt.title(f"{title}\nMean={mean_bias:.2f}, Std={std_bias:.2f}")
-    plt.xlabel("Bias (Pred - Obs)")
-    plt.ylabel("Count")
+def plot_bias_hist(y_true, y_pred, title=None, rng=(-100,300)):
+    """Bias histogram from –100 to 300, big N, and Mean/Std/R² title."""
+    res = y_pred - y_true
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.hist(res, bins=50, range=rng, alpha=0.7)
+    ax.axvline(res.mean(), color='k', ls='--', lw=2)
+    ax.text(0.02, 0.95, f"N={len(y_true)}", transform=ax.transAxes,
+            fontsize=14, va='top')
+    mean, std, r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
+    ax.set_title(f"Mean={mean:.2f}, Std={std:.2f}, R²={r2:.3f}")
+    ax.set_xlabel("Bias (Pred − Obs, Days)")
+    ax.set_ylabel("Count")
     plt.tight_layout()
     plt.show()
 
-def plot_scatter_by_cat(y_true, y_pred, cat, title="Scatter by Category"):
+def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
+    """Colour by cat; no legend or title."""
     plt.figure(figsize=(6,6))
-    cat_colors = {0:'red', 1:'green', 2:'blue', 3:'orange'}
-
-    for cval in cat_colors.keys():
-        mask = (cat == cval)
-        if np.any(mask):
-            plt.scatter(
-                y_pred[mask],
-                y_true[mask],
-                alpha=0.4,
-                color=cat_colors[cval],
-                label=f"cat={cval}"
-            )
-
-    mn = min(y_pred.min(), y_true.min())
-    mx = max(y_pred.max(), y_true.max())
-    plt.plot([mn,mx],[mn,mx],'k--', label='1:1 line')
-
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    bias = np.mean(y_pred - y_true)
-    r2   = r2_score(y_true, y_pred)
-
-    plt.title(f"{title}\nRMSE={rmse:.2f}, Bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DoD")
-    plt.ylabel("Observed DoD")
-    plt.legend()
+    cols = {0:'red',1:'yellow',2:'green',3:'blue'}
+    mn, mx = min(y_pred.min(), y_true.min()), max(y_pred.max(), y_true.max())
+    for c,col in cols.items():
+        m = cat==c
+        if m.any():
+            plt.scatter(y_pred[m], y_true[m], c=col, alpha=0.4)
+    plt.plot([mn,mx],[mn,mx],'k--')
+    plt.xlabel("Predicted DSD")
+    plt.ylabel("Observed DSD")
     plt.tight_layout()
     plt.show()
 
-############################################################
-# 6) Additional Visualization
-#    (A) Original pixel-level bias map w/ high-res background
-#    (B) Boxplot by elev/veg
-#    (C) [NEW] Simple "grid" pixel-level bias map
-#    (D) [NEW] Mean predicted/observed DoD maps
-############################################################
-def produce_pixel_bias_map_hr_background(ds, pixel_idx, y_true, y_pred,
-        lat_var="latitude", lon_var="longitude",
-        title="Pixel Bias: High-Res Background"):
-    """
-    Original function that uses Cartopy (Stamen terrain tiles) for a high-res background.
-    We'll keep this here for completeness, but we won't call it if we prefer a simpler approach.
-    """
-    from matplotlib.colors import TwoSlopeNorm
-    tiler = cimgt.Stamen('terrain')
-    n_pixels = ds.dims["pixel"]
-    sum_bias = np.zeros(n_pixels, dtype=float)
-    count    = np.zeros(n_pixels, dtype=float)
-
-    residuals = y_pred - y_true
-    for i, px in enumerate(pixel_idx):
-        sum_bias[px] += residuals[i]
-        count[px]    += 1
-
-    mean_bias = np.full(n_pixels, np.nan, dtype=float)
-    mask = (count > 0)
-    mean_bias[mask] = sum_bias[mask] / count[mask]
-
-    lat_full = ds[lat_var].values
-    lon_full = ds[lon_var].values
-
-    # Flatten lat/lon if stored as 2D
-    if lat_full.ndim == 2:
-        lat_1d_all = lat_full[0, :]
-        lon_1d_all = lon_full[0, :]
-    else:
-        lat_1d_all = lat_full
-        lon_1d_all = lon_full
-
-    max_abs = np.nanmax(np.abs(mean_bias))
-    if np.isnan(max_abs):
-        max_abs = 1.0
-
-    from matplotlib.colors import TwoSlopeNorm
-    norm = TwoSlopeNorm(vmin=-max_abs, vcenter=0, vmax=max_abs)
-
-    fig = plt.figure(figsize=(9,7))
-    ax = plt.axes(projection=tiler.crs)
-
-    ax.set_extent([-125, -113, 32, 42], crs=ccrs.PlateCarree())
-    ax.add_image(tiler, 8)
-    ax.add_feature(cfeature.BORDERS, linewidth=0.5, alpha=0.5)
-    ax.add_feature(cfeature.STATES, linewidth=0.5, alpha=0.5)
-
-    # Plot pixels with no data in light gray
-    ax.scatter(
-        lon_1d_all, lat_1d_all,
-        transform=ccrs.PlateCarree(),
-        c="lightgray", s=3, alpha=0.7, label="Unused"
-    )
-    sc = ax.scatter(
-        lon_1d_all[mask],
-        lat_1d_all[mask],
-        transform=ccrs.PlateCarree(),
-        c=mean_bias[mask],
-        s=4, cmap="bwr", norm=norm, alpha=1
-    )
-    cb = plt.colorbar(sc, ax=ax, orientation='vertical', shrink=0.7)
-    cb.set_label("Mean Bias (Pred - Obs)")
-    plt.title(title)
-    plt.show()
-
-def plot_boxplot_dod_by_elev_veg(y_dod, elev, vegtyp, cat_label="c0"):
-    elev_edges = [500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500]
-    elev_bin_idx = np.digitize(elev, elev_edges) - 1
-    n_elev_bins = len(elev_edges) - 1
-
-    unique_veg = np.unique(vegtyp)
-
-    box_data = []
-    x_labels = []
-    for elev_i in range(n_elev_bins):
-        for veg_v in unique_veg:
-            sel = (elev_bin_idx == elev_i) & (vegtyp == veg_v)
-            y_sel = y_dod[sel]
-            box_data.append(y_sel)
-            low  = elev_edges[elev_i]
-            high = elev_edges[elev_i + 1]
-            elev_label = f"E[{int(low)}-{int(high)}]"
-            veg_label  = f"Veg={veg_v}"
-            x_labels.append(f"{elev_label}, {veg_label}")
-
-    plt.figure(figsize=(12,5))
-    plt.boxplot(box_data, showmeans=True)
-    plt.xticks(range(1, len(box_data)+1), x_labels, rotation=90)
-    plt.xlabel("(ElevationBin, VegTyp)")
-    plt.ylabel("Raw DoD")
-    plt.title(f"{cat_label}: DoD vs. (Elev, Veg)")
-    plt.tight_layout()
-    plt.show()
-
-# (C) [NEW] Simple grid-based bias map (no Cartopy)
-def produce_pixel_bias_map_simple(ds, pixel_idx, y_true, y_pred,
-                                  lat_var="latitude", lon_var="longitude",
-                                  title="Pixel Bias: Simple Grid"):
-    """
-    A simpler pixel-level bias map that just does a scatter of (lon, lat) 
-    colored by mean bias. Does NOT use Cartopy or any background tiles.
-    """
-    from matplotlib.colors import TwoSlopeNorm
-
-    n_pixels = ds.dims["pixel"]
-    sum_bias = np.zeros(n_pixels, dtype=float)
-    count = np.zeros(n_pixels, dtype=float)
-
-    # Accumulate bias per pixel
-    residuals = y_pred - y_true
-    for i, px in enumerate(pixel_idx):
-        sum_bias[px] += residuals[i]
-        count[px] += 1
-    mean_bias = np.full(n_pixels, np.nan, dtype=float)
-    good = (count > 0)
-    mean_bias[good] = sum_bias[good] / count[good]
-
-    # Extract lat/lon as 1D
-    lat_full = ds[lat_var].values
-    lon_full = ds[lon_var].values
-    if lat_full.ndim == 2:
-        lat_1d = lat_full[0, :]
-        lon_1d = lon_full[0, :]
-    else:
-        lat_1d = lat_full
-        lon_1d = lon_full
-
-    # Figure out color scaling
-    vmax = np.nanmax(np.abs(mean_bias)) or 1.0
-    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0, vmax=vmax)
-
-    plt.figure(figsize=(7,6))
-    # All points in light gray
-    plt.scatter(lon_1d, lat_1d, c="lightgray", s=5, alpha=0.7, label="No Data")
-    # Points with actual data in bwr
-    sc = plt.scatter(lon_1d[good], lat_1d[good],
-                     c=mean_bias[good], cmap="bwr", norm=norm,
-                     s=10, alpha=0.9, label="Bias")
-
-    plt.colorbar(sc, shrink=0.8, label="Mean Bias (Pred - Obs)")
-    plt.xlabel("Longitude")
-    plt.ylabel("Latitude")
-    plt.title(title)
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-# (D) [NEW] Plot mean predicted or observed DoD
-def plot_mean_dod_map_simple(ds, mean_vals,
-                             lat_var="latitude", lon_var="longitude",
-                             title="Mean DoD"):
-    """
-    Simple scatter map of per-pixel mean DoD (predicted or observed),
-    again not using Cartopy.
-    """
-    lat_full = ds[lat_var].values
-    lon_full = ds[lon_var].values
-    if lat_full.ndim == 2:
-        lat_1d = lat_full[0, :]
-        lon_1d = lon_full[0, :]
-    else:
-        lat_1d = lat_full
-        lon_1d = lon_full
-
-    plt.figure(figsize=(7,6))
-    sc = plt.scatter(lon_1d, lat_1d, c=mean_vals, cmap="viridis", s=10, alpha=0.9)
-    plt.colorbar(sc, shrink=0.8, label="Mean DoD (days)")
-    plt.xlabel("Longitude")
-    plt.ylabel("Latitude")
-    plt.title(title)
-    plt.tight_layout()
-    plt.show()
-
-############################################################
-# 7) Feature Importance Plot (Random Forest)
-############################################################
-def plot_top10_features(rf_model, feat_names, title="Top 10 Feature Importances"):
-    importances = rf_model.feature_importances_
-    idx_sorted = np.argsort(importances)[::-1]
-    top10_idx  = idx_sorted[:10]
-    top10_vals = importances[top10_idx]
-    top10_names= [feat_names[i] for i in top10_idx]
-
+def plot_top10_features(rf, names):
+    """Bar chart of RF feature_importances_; no title; NICE_NAME xticks."""
+    imp = rf.feature_importances_
+    idx = np.argsort(imp)[::-1][:10]
     plt.figure(figsize=(8,4))
-    plt.bar(range(len(top10_vals)), top10_vals, align='center')
-    plt.xticks(range(len(top10_vals)), top10_names, rotation=45, ha='right')
-    plt.title(title)
-    plt.ylabel("Feature Importance")
+    plt.bar(range(10), imp[idx])
+    plt.xticks(range(10),
+               [NICE_NAME.get(names[i], names[i]) for i in idx],
+               rotation=45, ha='right')
+    plt.ylabel("Feature importance")
     plt.tight_layout()
     plt.show()
 
-def plot_top5_feature_scatter(rf_model, X_valid, y_valid, cat_valid, feat_names,
-                              title_prefix="(NewApproach)"):
-    importances = rf_model.feature_importances_
-    idx_sorted = np.argsort(importances)[::-1]
-    top5_idx   = idx_sorted[:5]
+def plot_permutation_importance(rf, X_val, y_val, names):
+    """Bar chart of permutation importances; no title; NICE_NAME xticks."""
+    res = permutation_importance(rf, X_val, y_val,
+                                 n_repeats=5, random_state=42)
+    imp = res.importances_mean
+    idx = np.argsort(imp)[::-1][:10]
+    plt.figure(figsize=(8,4))
+    plt.bar(range(10), imp[idx])
+    plt.xticks(range(10),
+               [NICE_NAME.get(names[i], names[i]) for i in idx],
+               rotation=45, ha='right')
+    plt.ylabel("Permutation importance")
+    plt.tight_layout()
+    plt.show()
 
-    cat_colors = {0:'red', 1:'blue', 2:'green', 3:'purple'}
 
-    for feat_idx in top5_idx:
-        fname = feat_names[feat_idx]
-        feat_vals = X_valid[:, feat_idx]
+# ────────────────────────────────────────────────────────────
+# 2) Top-5 binned feature scatter (Spearman + p-value formatting)
 
-        plt.figure(figsize=(6,5))
-        for cval, ccolor in cat_colors.items():
-            sel_c = (cat_valid == cval)
-            plt.scatter(
-                y_valid[sel_c],
-                feat_vals[sel_c],
-                c=ccolor,
-                alpha=0.4,
-                s=10,
-                label=f"cat={cval}"
-            )
+def plot_top5_feature_scatter_binned(
+    rf,
+    X: np.ndarray,
+    y: np.ndarray,
+    cat: np.ndarray,
+    names: List[str],
+    n_bins: int = 20
+):
+    imp  = rf.feature_importances_
+    top5 = np.argsort(imp)[::-1][:5]
+    cols = {0:'red',1:'yellow',2:'green',3:'blue'}
 
-        mask_lin = np.isfinite(y_valid) & np.isfinite(feat_vals)
-        if np.sum(mask_lin) > 2:
-            r_val = np.corrcoef(y_valid[mask_lin], feat_vals[mask_lin])[0,1]
-        else:
-            r_val = np.nan
+    for rank, f_idx in enumerate(top5, start=1):
+        fname = names[f_idx]
+        pretty = NICE_NAME.get(fname, fname)
 
-        plt.legend(title=f"r={r_val:.2f}", loc="best")
-        plt.xlabel("Observed DOD")
-        plt.ylabel(fname)
-        plt.title(f"{title_prefix}: Feature={fname}")
+        x_all = X[:,f_idx]
+        edges = np.linspace(x_all.min(), x_all.max(), n_bins+1)
+        centers = 0.5*(edges[:-1]+edges[1:])
+
+        plt.figure(figsize=(7,5))
+        for c,col in cols.items():
+            m = cat==c
+            if not m.any(): continue
+            rho,p = spearmanr(x_all[m], y[m])
+            if   p == 0:     p_label = "p=0"
+            elif p < 0.01:   p_label = "p<0.01"
+            else:            p_label = f"p={p:.2g}"
+            ymu, ysd, xv = [], [], []
+            for i in range(n_bins):
+                sel = m & (x_all>=edges[i]) & (x_all<edges[i+1])
+                if not sel.any(): continue
+                ymu.append(y[sel].mean())
+                ysd.append(y[sel].std(ddof=0))
+                xv.append(centers[i])
+            if not xv: continue
+
+            plt.errorbar(xv, ymu, yerr=ysd, fmt='o', ms=4, lw=1,
+                         color=col, ecolor=col, alpha=0.8,
+                         label=f"cat={c} (ρ={rho:.2f}, {p_label})")
+            plt.plot(xv, ymu, '-', color=col, alpha=0.7)
+
+        plt.xlabel(pretty)
+        plt.ylabel("Observed DSD (days)")
+        plt.title(f"Feature {rank}")
+        plt.legend()
         plt.tight_layout()
         plt.show()
 
-# ------------------------------------------------------------------
-# 8‑A) **NEW** helper: metrics for arbitrary burn‑fraction bins
-# ------------------------------------------------------------------
-def evaluate_metrics_per_bin(y_true: np.ndarray,
-                              y_pred: np.ndarray,
-                              burn_vals: np.ndarray,
-                              bins: list[tuple[float, Optional[float]]],
-                              label: str = "BurnFrac") -> None:
+# ────────────────────────────────────────────────────────────
+# 3) Spatial helpers
+# ────────────────────────────────────────────────────────────
+TILER = cimgt.GoogleTiles(style='satellite')
+TILER.request_timeout = 5
+
+_RELIEF = cfeature.NaturalEarthFeature(
+    "physical", "shaded_relief", "10m",
+    edgecolor="none", facecolor=cfeature.COLORS["land"]
+)
+
+def _satellite_available(timeout_s: int = 2) -> bool:
+    url = ("https://services.arcgisonline.com/arcgis/rest/services/"
+           "World_Imagery/MapServer")
+    try:
+        requests.head(url, timeout=timeout_s)
+        return True
+    except (requests.RequestException, socket.error):
+        return False
+
+USE_SAT = _satellite_available()
+print("[INFO] satellite tiles available:", USE_SAT)
+
+# one-time Web-Mercator extent
+merc   = ccrs.epsg(3857)
+x0, y0 = merc.transform_point(CA_LON_W, CA_LAT_S, ccrs.PlateCarree())
+x1, y1 = merc.transform_point(CA_LON_E, CA_LAT_N, ccrs.PlateCarree())
+CA_EXTENT = [x0, y0, x1, y1]
+
+def _add_background(ax, zoom=6):
     """
-    Print RMSE / Bias / R² for each (lo, hi] interval in *bins*.
-    A *hi* of None means 'greater than lo'.
+    Adds a satellite (or shaded-relief fallback) background plus state borders.
+    The caller must set map extent beforehand.
     """
-    for lo, hi in bins:
-        if hi is None:                         # open upper bound
-            sel = burn_vals > lo
-            tag = f">{lo*100:.0f}%"
+    if USE_SAT:
+        try:
+            ax.add_image(TILER, zoom, interpolation="nearest")
+        except Exception as e:
+            print("⚠︎ satellite tiles skipped:", e)
+            ax.add_feature(_RELIEF, zorder=0)
+    else:
+        ax.add_feature(_RELIEF, zorder=0)
+
+    # state borders
+    states_shp = "data/cb_2022_us_state_500k/cb_2022_us_state_500k.shp"
+    _states = gpd.read_file(states_shp).to_crs(epsg=4326)
+    _states.boundary.plot(
+        ax=ax,
+        linewidth=0.6,
+        edgecolor="black",
+        zorder=2,
+        transform=ccrs.PlateCarree()
+    )
+
+def dod_map_ca(ds, pix_idx, values, title,
+               cmap="Blues", vmin=50, vmax=250):
+    """
+    Light-blue → dark-blue DSD map on a common 50…250 day scale.
+    """
+    merc = ccrs.epsg(3857)
+    lat = ds["latitude"].values.ravel(); lon = ds["longitude"].values.ravel()
+    x, y = merc.transform_points(ccrs.Geodetic(),
+                                 lon[pix_idx], lat[pix_idx])[:, :2].T
+    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
+    _add_background(ax, zoom=6)
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
+                  crs=ccrs.PlateCarree())
+    sc = ax.scatter(
+        x, y, c=values, cmap=cmap,
+        vmin=vmin, vmax=vmax,
+        s=PIX_SZ, marker="s", transform=merc, zorder=3
+    )
+    plt.colorbar(sc, ax=ax, shrink=0.8, label="DSD (days)")
+    ax.set_title(title); plt.tight_layout(); plt.show()
+
+def bias_map_ca(ds, pix_idx, y_true, y_pred, title):
+    """
+    Per-pixel bias (Pred − Obs) clipped to ±60 days, with blue=positive, red=negative.
+    """
+    merc = ccrs.epsg(3857)
+    lat = ds["latitude"].values.ravel(); lon = ds["longitude"].values.ravel()
+    x, y = merc.transform_points(ccrs.Geodetic(),
+                                 lon[pix_idx], lat[pix_idx])[:, :2].T
+    bias = np.clip(y_pred - y_true, -60, 60)
+    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
+    _add_background(ax, zoom=6)
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
+                  crs=ccrs.PlateCarree())
+    sc = ax.scatter(
+        x, y, c=bias, cmap="seismic_r",
+        norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
+        s=PIX_SZ, marker="s", transform=merc, zorder=3
+    )
+    plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Pred-Obs, days)")
+    #ax.set_title(title); 
+    plt.tight_layout(); plt.show()
+
+# ────────────────────────────────────────────────────────────
+# 4) Elev×Veg and boxplots
+def boxplot_dod_by_cat(y_obs, y_pred, cat, title_prefix):
+    cats = [0,1,2,3]
+    data_obs = [y_obs[cat==c] for c in cats]
+    data_pre = [y_pred[cat==c] for c in cats]
+    fig, axs = plt.subplots(1,2,figsize=(10,4), sharey=True)
+    axs[0].boxplot(data_obs, showmeans=True); axs[0].set_title(f"{title_prefix} – OBS")
+    axs[1].boxplot(data_pre,showmeans=True); axs[1].set_title(f"{title_prefix} – PRED")
+    for ax in axs:
+        ax.set_xticklabels([f"c{c}" for c in cats]); ax.set_xlabel("Category")
+    axs[0].set_ylabel("DSD (days)")
+    plt.tight_layout()
+    plt.show()
+
+def transparent_histogram_by_cat(vals, cat, title):
+    plt.figure(figsize=(6,4))
+    rng = (np.nanmin(vals), np.nanmax(vals))
+    for c,col in {0:'red',1:'yellow',2:'green',3:'blue'}.items():
+        sel = cat==c
+        if sel.any():
+            plt.hist(vals[sel], bins=40, range=rng, alpha=0.35,
+                     label=f"c{c}", density=True, color=col)
+    plt.xlabel("DSD (days)"); plt.ylabel("relative freq.")
+    plt.title(title); plt.legend(); plt.tight_layout(); plt.show()
+
+def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, title=None,
+                          elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500)):
+    bias = y_pred - y_true
+    elev_bin = np.digitize(elev, elev_edges) - 1
+    vrange = GLOBAL_VEGRANGE; nveg = len(vrange)
+    grid = np.full((len(elev_edges)-1,nveg), np.nan)
+    for i in range(len(elev_edges)-1):
+        for j,v in enumerate(vrange):
+            sel = (elev_bin==i)&(veg==v)
+            if sel.any():
+                grid[i,j] = np.nanmean(bias[sel])
+    plt.figure(figsize=(8,4))
+    im = plt.imshow(grid, cmap='seismic_r', vmin=-60, vmax=60,
+                    origin='lower', aspect='auto')
+    for i in range(grid.shape[0]):
+        for j in range(grid.shape[1]):
+            plt.gca().add_patch(plt.Rectangle((j-0.5,i-0.5),1,1,
+                                              ec='black',fc='none',lw=0.6))
+            if not np.isnan(grid[i,j]):
+                plt.text(j, i, f"{grid[i,j]:.0f}", ha='center',va='center',fontsize=6)
+    plt.xticks(range(nveg), [VEG_NAMES[v] for v in vrange], rotation=45,ha='right')
+    plt.yticks(range(len(elev_edges)-1),
+               [f"{elev_edges[i]}–{elev_edges[i+1]} m" for i in range(len(elev_edges)-1)])
+    plt.colorbar(im, label="Bias (days)")
+    plt.tight_layout()
+    plt.show()
+
+# ────────────────────────────────────────────────────────────
+# 5) Feature matrix
+def gather_features_nobf(ds, target="DOD"):
+    excl = {target.lower(),'lat','lon','latitude','longitude',
+            'pixel','year','ncoords_vector','nyears_vector',
+            'aorcsummerhumidity','aorcsummerprecipitation',
+            'aorcsummerlongwave','aorcsummershortwave','aorcsummertemperature'}
+    ny = ds.sizes['year']; feats = {}
+    for v in ds.data_vars:
+        if v.lower() in excl: continue
+        da = ds[v]
+        if set(da.dims)=={'year','pixel'}: feats[v]=da.values
+        elif set(da.dims)=={'pixel'}:
+            feats[v] = np.tile(da.values, (ny,1))
+    return feats
+
+def flatten_nobf(ds, target="DOD"):
+    fd = gather_features_nobf(ds,target)
+    names = sorted(fd)
+    X = np.column_stack([fd[n].ravel(order='C') for n in names])
+    y = ds[target].values.ravel(order='C')
+    ok = (~np.isnan(X).any(axis=1)) & np.isfinite(y)
+    return X,y,names,ok
+
+# ────────────────────────────────────────────────────────────
+# 6) 10 % burn-fraction bins
+def eval_bins(y, yp, burn):
+    bins = [(i/10, (i+1)/10) for i in range(9)] + [(0.9, None)]
+    for lo,hi in bins:
+        if hi is None:
+            sel = burn>lo; tag=f">{lo*100:.0f}%"
         else:
-            sel = (burn_vals >= lo) & (burn_vals < hi)
-            tag = f"{lo*100:.0f}-{hi*100:.0f}%"
-        n = int(np.sum(sel))
-        if n == 0:
-            print(f"{label} {tag:>7}:  N=0 – skipped")
-            continue
-        rmse = np.sqrt(mean_squared_error(y_true[sel], y_pred[sel]))
-        bias = np.mean(y_pred[sel] - y_true[sel])
-        r2   = r2_score(y_true[sel], y_pred[sel]) if n > 1 else np.nan
-        print(f"{label} {tag:>7}:  N={n:5d}  RMSE={rmse:6.2f}  "
-              f"Bias={bias:7.2f}  R²={r2:6.3f}")
+            sel = (burn>=lo)&(burn<hi); tag=f"{lo*100:.0f}-{hi*100:.0f}%"
+        if sel.sum()==0:
+            print(f"{tag}: N=0"); continue
+        rmse = np.sqrt(mean_squared_error(y[sel], yp[sel]))
+        bias= (yp[sel]-y[sel]).mean(); r2 = r2_score(y[sel], yp[sel])
+        print(f"{tag}: N={sel.sum():4d}  RMSE={rmse:.2f}  Bias={bias:.2f}  R²={r2:.3f}")
 
-############################################################
-# 8) The NEW random forest experiment
-#    + Wilcoxon rank-sum test
-#    + Additional test using the category with fewest samples
-#    + Save predicted/observed DoD arrays to .txt
-#    + Now we add simpler spatial maps for bias + mean predicted/observed
-############################################################
-def run_rf_incl_burn_categorized(
-        X_all: np.ndarray,
-        y_all: np.ndarray,
-        cat_2d: np.ndarray,
-        valid_mask: np.ndarray,
-        ds: xr.Dataset,
-        feat_names: list[str]
-    ):
-    """
-    Train a Random‑Forest (burn_fraction *included* as a predictor),
-    evaluate by cumulative‑burn category, and visualise results.
+# ────────────────────────────────────────────────────────────
+# 7) Main RF experiment (70/30 per cat)
+def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names):
+    # flatten
+    cat = cat2d.ravel(order='C')[ok]
+    Xv, Yv = X[ok], y[ok]
 
-    NEW ➜ after the down‑sampling robustness check, plot histograms of
-    the 10 mean‑bias values and 10 RMSE values obtained for every
-    category that participates in the check.
-    """
+    # 70/30 split per category
+    tr_idx, te_idx = [], []
+    for c in (0,1,2,3):
+        rows = np.where(cat==c)[0]
+        if rows.size==0: continue
+        tr, te = train_test_split(rows, test_size=0.3, random_state=42)
+        tr_idx.append(tr); te_idx.append(te)
+    tr_idx = np.concatenate(tr_idx)
+    te_idx = np.concatenate(te_idx)
+    cat_te = cat[te_idx]
 
-    # ──────────────────────────────────────────────────────────────
-    # 0.  Flatten arrays & masks
-    # ──────────────────────────────────────────────────────────────
-    cat_flat   = cat_2d.ravel(order="C")
-    cat_valid  = cat_flat[valid_mask]
-    X_valid, y_valid = X_all[valid_mask], y_all[valid_mask]
-
-    # ──────────────────────────────────────────────────────────────
-    # 1.  70 / 30 split *within* each category (c0‑c3)
-    # ──────────────────────────────────────────────────────────────
-    train_idx, test_idx = [], []
-    for c in (0, 1, 2, 3):
-        rows = np.where(cat_valid == c)[0]
-        if rows.size == 0:
-            print(f"cat={c}: no valid rows – skipped");  continue
-        tr, te = train_test_split(rows, test_size=0.30, random_state=42)
-        train_idx.append(tr);  test_idx.append(te)
-
-    if not train_idx:
-        print("No training data – abort.");  return None
-
-    train_idx = np.concatenate(train_idx)
-    test_idx  = np.concatenate(test_idx)
-
-    X_tr, y_tr = X_valid[train_idx], y_valid[train_idx]
-    X_te, y_te = X_valid[test_idx],  y_valid[test_idx]
-
-    # ──────────────────────────────────────────────────────────────
-    # 2.  Train RF
-    # ──────────────────────────────────────────────────────────────
+    # train & fit
+    X_tr, y_tr = Xv[tr_idx], Yv[tr_idx]
     rf = RandomForestRegressor(n_estimators=100, random_state=42)
     rf.fit(X_tr, y_tr)
 
-    # basic plots
-    plot_scatter(y_tr, rf.predict(X_tr), "RF: Train (70 % each cat)")
-    plot_bias_hist(y_tr, rf.predict(X_tr), "RF Bias Hist: Train")
+    # TEST predictions
+    X_te, y_te = Xv[te_idx], Yv[te_idx]
+    yhat_te = rf.predict(X_te)
 
-    y_pred_te = rf.predict(X_te)
-    plot_scatter(y_te, y_pred_te, "RF: Test (30 % each cat)")
-    plot_bias_hist(y_te, y_pred_te, "RF Bias Hist: Test (all cats)")
+    # A) per-category scatter & bias-hist
+    for c in (0,1,2,3):
+        m = cat_te==c
+        if not m.any(): continue
+        plot_scatter(    y_te[m],  yhat_te[m],    title=None)
+        plot_bias_hist(  y_te[m],  yhat_te[m],    title=None)
 
-    # ──────────────────────────────────────────────────────────────
-    # 3.  Wilcoxon rank‑sum (bias c1/2/3 vs c0)
-    # ──────────────────────────────────────────────────────────────
-    cat_test = cat_valid[test_idx]
-    bias_all = y_pred_te - y_te
-    bias_by_cat = {c: bias_all[cat_test == c] for c in range(4)
-                   if (cat_test == c).any()}
+    # B) pixel-bias maps (no titles)
+    pix_full = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
+    pix_ok   = pix_full[ok]
+    for c in (None, *[0,1,2,3]):
+        if c is None:
+            idx = pix_ok[te_idx]
+            ytrue, ypred = y_te, yhat_te
+        else:
+            mask = cat_te==c
+            idx = pix_ok[te_idx][mask]
+            ytrue, ypred = y_te[mask], yhat_te[mask]
+        bias_map_ca(ds, idx, ytrue, ypred, title=None)
 
-    if 0 in bias_by_cat:
-        print("\nWilcoxon rank‑sum: bias(cX) vs bias(c0)")
-        for c in (1, 2, 3):
-            if c in bias_by_cat:
-                stat, p = ranksums(bias_by_cat[0], bias_by_cat[c])
-                print(f"  c{c} vs c0 → stat={stat:.3f}, p={p:.3g}")
-            else:
-                print(f"  c{c} vs c0 → no samples – skipped")
+    # C) Elev×Veg per test-category
+    for c in (0,1,2,3):
+        m = cat_te==c
+        if not m.any(): continue
+        elev = ds["Elevation"].values.ravel(order='C')[ok][te_idx][m]
+        veg  = ds["VegTyp"]   .values.ravel(order='C')[ok][te_idx][m].astype(int)
+        heat_bias_by_elev_veg(y_te[m], yhat_te[m], elev, veg, title=None)
 
-    # ──────────────────────────────────────────────────────────────
-    # 4.  Down‑sampling robustness check  (NEW histograms)
-    # ──────────────────────────────────────────────────────────────
-    counts   = {c: (cat_test == c).sum() for c in range(4) if (cat_test == c).any()}
-    if counts:
-        k_min   = min(counts.values())
-        print(f"\nDown‑sampling robustness: min category size = {k_min}")
+    # D) feature importance
+    plot_top10_features(rf, feat_names)
+    plot_permutation_importance(rf, Xv, Yv, feat_names)
 
-        bias_dist, rmse_dist = {}, {}
+    # E) top-5 binned
+    plot_top5_feature_scatter_binned(rf, Xv, Yv, cat, feat_names)
 
-        for c, n_c in counts.items():
-            idx_c = np.where(cat_test == c)[0]
-            if n_c < k_min:                # should not happen, but guard
-                continue
-            biases, rmses = [], []
-            for _ in range(10):
-                sub_idx = npr.choice(idx_c, size=k_min, replace=False)
-                y_sub   = y_te[sub_idx]
-                y_pred  = y_pred_te[sub_idx]
-                biases.append((y_pred - y_sub).mean())
-                rmses.append(np.sqrt(mean_squared_error(y_sub, y_pred)))
-            bias_dist[c] = biases
-            rmse_dist[c] = rmses
-            print(f"  cat={c}: mean(μ_bias)={np.mean(biases):.3f}, "
-                  f"mean(RMSE)={np.mean(rmses):.3f}")
+    # F) down-sampling robustness
+    counts = {c:(cat_te==c).sum() for c in (0,1,2,3) if (cat_te==c).any()}
+    k = min(counts.values())
+    metrics = {c:{'bias':[], 'rmse':[], 'r2':[]} for c in counts}
+    for c,n in counts.items():
+        idx_c = np.where(cat_te==c)[0]
+        for _ in range(100):
+            sub = npr.choice(idx_c, size=k, replace=False)
+            y_s, p_s = y_te[sub], yhat_te[sub]
+            metrics[c]['bias'].append((p_s-y_s).mean())
+            metrics[c]['rmse'].append(np.sqrt(mean_squared_error(y_s,p_s)))
+            metrics[c]['r2'].append(r2_score(y_s,p_s))
 
-        # ── plot histograms
-        for c in bias_dist:
-            plt.figure(figsize=(10,4))
+    orig = {c:{
+        'bias': np.mean(metrics[c]['bias']),
+        'rmse': np.mean(metrics[c]['rmse']),
+        'r2':   np.mean(metrics[c]['r2'])
+    } for c in metrics}
 
-            plt.subplot(1,2,1)
-            plt.hist(bias_dist[c], bins=5, color="steelblue", alpha=0.8)
-            plt.axvline(np.mean(bias_dist[c]), color="k", ls="--")
-            plt.title(f"cat={c} – Mean Bias (10 subsamples)")
-            plt.xlabel("Mean Bias");  plt.ylabel("Count")
+    fig = plt.figure(figsize=(15,4))
+    for j,(key,lab) in enumerate([('bias','Mean Bias'),
+                                  ('rmse','RMSE'),
+                                  ('r2','R²')], 1):
+        ax = fig.add_subplot(1,3,j)
+        for c,col in {0:'black',1:'blue',3:'red'}.items():
+            ax.hist(metrics[c][key], bins=10, alpha=0.45, color=col)
+            ax.axvline(orig[c][key], color=col, ls='-', lw=2)
+        # cat2 line-only
+        ax.axvline(orig[2][key], color='grey', ls='-', lw=2)
+        ax.set_xlabel(lab)
+    fig.suptitle(f"Experiment 3 (k={k})")
+    plt.tight_layout()
+    plt.show()
 
-            plt.subplot(1,2,2)
-            plt.hist(rmse_dist[c], bins=5, color="tomato", alpha=0.8)
-            plt.axvline(np.mean(rmse_dist[c]), color="k", ls="--")
-            plt.title(f"cat={c} – RMSE (10 subsamples)")
-            plt.xlabel("RMSE");  plt.ylabel("Count")
+    # G) burn-fraction bins
+    bf = ds["burn_fraction"].values.ravel(order='C')[ok][te_idx]
+    print("\nPerformance by 10 % burn-fraction bins (Test set):")
+    eval_bins(y_te, yhat_te, bf)
 
-            plt.suptitle(f"Down‑sampling distributions (k={k_min})")
-            plt.tight_layout();  plt.show()
+    # H) Wilcoxon on top-5 features
+    top5 = np.argsort(rf.feature_importances_)[::-1][:5]
+    for f in top5:
+        pretty = NICE_NAME.get(feat_names[f], feat_names[f])
+        v0 = Xv[cat==0, f]
+        for c in (1,2,3):
+            vc = Xv[cat==c, f]
+            if vc.size:
+                s,p = ranksums(v0, vc)
+                print(f"Feat {pretty} c0 vs c{c}: stat={s:.3f}, p={p:.3g}")
 
-    # ──────────────────────────────────────────────────────────────
-    # 5.  Save per‑cat obs / pred, per‑cat plots (unchanged)
-    # ──────────────────────────────────────────────────────────────
-    # …  (retain your existing code for saving .txt, per‑cat scatter,
-    #     colour‑coded scatter, 10 % burn‑fraction bins, bias maps,
-    #     mean‑DoD maps, feature importance, etc.) …
-    # -----------------------------------------------------------------
-    # return fitted model
     return rf
 
-
-
-############################################################
+# ────────────────────────────────────────────────────────────
 # MAIN
-############################################################
-if __name__ == "__main__":
-    path_pat = "/Users/yashnilmohanty/Desktop/data/BurnArea_Data/Merged_BurnArea_{year:04d}{month:02d}.nc"
-    pre_burn = compute_pre2004_burn(coords, path_pat, 2001, 2003)
+if __name__=="__main__":
+    log("loading final_dataset4.nc …")
+    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset4.nc")
 
-    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset3.nc")
-    cumsum_2d = compute_burn_cumsum_with_initial(ds, pre_burn)
-    ds["burn_cumsum"] = (("year", "pixel"), cumsum_2d)
-    cat_2d = define_4cats_cumsum(cumsum_2d)
+    # build veg-range
+    veg_all = ds["VegTyp"].values.ravel(order='C').astype(int)
+    GLOBAL_VEGRANGE = np.unique(veg_all[np.isfinite(veg_all)])
 
-    X_all, y_all, feat_names, valid_mask = flatten_spatiotemporal(ds, target_var="DOD")
-    print("Feature names:", feat_names)
+    # compute categories
+    bc = ds["burn_cumsum"].values
+    cat2d = np.zeros_like(bc, dtype=int)
+    cat2d[bc < 0.25] = 0
+    cat2d[(bc>=0.25)&(bc<0.50)] = 1
+    cat2d[(bc>=0.50)&(bc<0.75)] = 2
+    cat2d[bc>=0.75] = 3
+    log("categories computed")
 
-    rf_model = run_rf_incl_burn_categorized(
-        X_all, y_all, cat_2d, valid_mask, ds, feat_names
-    )
-    print("DONE.")
+    # flatten
+    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DOD")
+    log("feature matrix ready (burn_fraction excluded)")
+
+    # run experiment
+    rf_model = rf_experiment_nobf(X_all, y_all, cat2d, ok, ds, feat_names)
+    log("ALL DONE (Experiment 2).")
