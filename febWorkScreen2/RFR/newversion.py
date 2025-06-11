@@ -504,8 +504,6 @@ def dod_map_ca(ds, pix_idx, values, title=None,
     cb = plt.colorbar(sc, ax=ax, shrink=0.8, label="DSD (Days)")
     cb.ax.tick_params(labelsize=FONT_TICK)
     cb.set_label("DSD (Days)", fontsize=FONT_LABEL)
-    if title:
-        ax.set_title(title, fontsize=FONT_LABEL)
     plt.tight_layout()
     plt.show()
 
@@ -525,8 +523,6 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None):
     cb = plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Days)")
     cb.ax.tick_params(labelsize=FONT_TICK)
     cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
-    if title:
-        ax.set_title(title, fontsize=FONT_LABEL)
     plt.tight_layout()
     plt.show()
 
@@ -864,6 +860,7 @@ def rf_unburned_experiment(
             ('r2',   'R²')
         ], 1):
         ax = fig.add_subplot(1, 3, j)
+        ax.tick_params(axis='both', labelsize=FONT_TICK+2)
 
         # 1) histograms + dashed means for cats 0,1,3
         for c, col in {0:'black',1:'blue',3:'red'}.items():
@@ -881,7 +878,7 @@ def rf_unburned_experiment(
         ax.set_xlabel(xlabel, fontsize=FONT_LABEL)
         # no title—xlabel is enough
         if j == 1:
-            ax.legend()
+            ax.legend(fontsize=FONT_LEGEND+2)
     # no suptitle
     fig.tight_layout()
     plt.show()
