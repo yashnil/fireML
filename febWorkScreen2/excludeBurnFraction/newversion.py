@@ -167,7 +167,7 @@ def plot_top10_features(rf, names):
         [NICE_NAME.get(names[i], names[i]) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
-    ax.set_ylabel("Feature importance", fontsize=FONT_LABEL)
+    ax.set_ylabel("Feature Importance", fontsize=FONT_LABEL)
     ax.tick_params(axis='y', labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
@@ -183,7 +183,7 @@ def plot_permutation_importance(rf, X_val, y_val, names):
         [NICE_NAME.get(names[i], names[i]) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
-    ax.set_ylabel("Permutation importance", fontsize=FONT_LABEL)
+    ax.set_ylabel("Permutation Importance", fontsize=FONT_LABEL)
     ax.tick_params(axis='y', labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
@@ -497,8 +497,8 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names):
     } for c in metrics}
 
     fig = plt.figure(figsize=(15,4))
-    for j,(key,lab) in enumerate([('bias','Mean Bias'),
-                                  ('rmse','RMSE'),
+    for j,(key,lab) in enumerate([('bias','Mean Bias (days)'),
+                                  ('rmse','RMSE (days)'),
                                   ('r2','R²')], 1):
         ax = fig.add_subplot(1,3,j)
         ax.tick_params(labelsize=FONT_TICK+2)
