@@ -15,6 +15,7 @@ import numpy.random as npr
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 from scipy.stats import ranksums, spearmanr
+from scipy.stats import gaussian_kde
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.inspection import permutation_importance
 from sklearn.model_selection import train_test_split
@@ -26,7 +27,7 @@ import geopandas as gpd
 from typing import List, Dict
 
 # ────────────────────────────────────────────────────────────
-PIX_SZ = 1
+PIX_SZ = 0.5
 CA_LON_W, CA_LON_E = -124.5, -117.5   # west, east
 CA_LAT_S, CA_LAT_N =   37,   42.5   # south, north
 FONT_LABEL  = 14
@@ -97,47 +98,72 @@ def plot_scatter(y_true, y_pred, title=None):
     plt.tight_layout()
     plt.show()
 
-def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx, gridsize=80):
+
+def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx,
+                                point_size: int = 16,
+                                cmap: str = "inferno",
+                                kde_sample_max: int = 40_000):
     """
-    Hexbin density scatter, 1:1 line, square axes.
+    Gaussian-KDE density scatter for a single burn-category.
+       • warm colours = higher density
+       • NO colour-bar
+       • identical limits/aspect as the plain scatter
     """
-    mask = (cat == cat_idx)
-    x, y = y_pred[mask], y_true[mask]
-    fig, ax = plt.subplots(figsize=(6,6))
-    hb = ax.hexbin(x, y, gridsize=gridsize, cmap='inferno', mincnt=1)
+    sel = (cat == cat_idx)
+    x, y = y_pred[sel], y_true[sel]
+    if x.size == 0:
+        return
+
+    # KDE on a subset if too many points
+    if x.size <= kde_sample_max:
+        z = gaussian_kde(np.vstack([x, y]))(np.vstack([x, y]))
+    else:
+        sub = np.random.choice(x.size, kde_sample_max, replace=False)
+        kde = gaussian_kde(np.vstack([x[sub], y[sub]]))
+        z   = kde(np.vstack([x, y]))
+
+    order = z.argsort()
+    x, y, z = x[order], y[order], z[order]
+
     mn, mx = float(min(x.min(), y.min())), float(max(x.max(), y.max()))
-    pad = (mx - mn) * 0.05
+    pad    = (mx - mn) * 0.05
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(x, y, c=z, s=point_size, cmap=cmap, rasterized=True)
     ax.plot([mn, mx], [mn, mx], 'k--', lw=1)
     ax.set_xlim(mn - pad, mx + pad)
     ax.set_ylim(mn - pad, mx + pad)
     ax.set_aspect('equal', 'box')
-    ticks = ax.get_yticks()
-    ax.set_xticks(ticks)
     ax.set_xlabel("Predicted DSD", fontsize=FONT_LABEL)
     ax.set_ylabel("Observed DSD",  fontsize=FONT_LABEL)
     ax.tick_params(labelsize=FONT_TICK)
-    cb = fig.colorbar(hb, ax=ax, shrink=0.8, label="Counts")
-    cb.ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
 
-def plot_bias_hist(y_true, y_pred, title=None, rng=(-100,300)):
-    fig, ax = plt.subplots(figsize=(6,4))
+
+def plot_bias_hist(y_true, y_pred, title=None,
+                   rng=(-100, 300), tick_limit: int = 100):
+    """Histogram with ±100-day labelled ticks and x-axis 'Bias (Days)'."""
     res = y_pred - y_true
+    fig, ax = plt.subplots(figsize=(6, 4))
     ax.hist(res, bins=50, range=rng, alpha=0.7)
     ax.axvline(res.mean(), color='k', ls='--', lw=2)
     ax.text(0.02, 0.95, f"N={len(y_true)}",
             transform=ax.transAxes, fontsize=FONT_LEGEND, va='top')
+
     mean, std, r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
-    ax.set_title(
-        f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}",
-        fontsize=FONT_LABEL
-    )
-    ax.set_xlabel("Bias (Pred − Obs, Days)", fontsize=FONT_LABEL)
+    ax.set_title(f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}",
+                 fontsize=FONT_LABEL)
+
+    ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
+    xt = ax.get_xticks()
+    ax.set_xticklabels([f"{t:g}" if abs(t) <= tick_limit else "" for t in xt])
+
     ax.set_ylabel("Count", fontsize=FONT_LABEL)
     ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
+
 
 def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
     fig, ax = plt.subplots(figsize=(6,6))
@@ -167,7 +193,7 @@ def plot_top10_features(rf, names):
         [NICE_NAME.get(names[i], names[i]) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
-    ax.set_ylabel("Feature Importance", fontsize=FONT_LABEL)
+    ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
     ax.tick_params(axis='y', labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
@@ -183,7 +209,7 @@ def plot_permutation_importance(rf, X_val, y_val, names):
         [NICE_NAME.get(names[i], names[i]) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
-    ax.set_ylabel("Permutation Importance", fontsize=FONT_LABEL)
+    ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
     ax.tick_params(axis='y', labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
@@ -227,7 +253,7 @@ def plot_top5_feature_scatter_binned(
             ax.plot(xv, ymu, '-', color=col, alpha=0.7)
         ax.set_xlabel(pretty, fontsize=FONT_LABEL)
         ax.set_ylabel("Observed DSD (Days)", fontsize=FONT_LABEL)
-        ax.set_title(f"Feature {rank}", fontsize=FONT_LABEL+2)
+        ax.set_title(f"Predictor {rank}", fontsize=FONT_LABEL+2)
         ax.tick_params(axis='both', labelsize=FONT_TICK)
         ax.legend(fontsize=FONT_LEGEND, loc="best")
         plt.tight_layout()
@@ -295,23 +321,30 @@ def dod_map_ca(ds, pix_idx, values, title=None,
     plt.show()
 
 def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None):
+    """Pixel-bias map, colour-limited to ±40 days."""
     merc = ccrs.epsg(3857)
-    lat = ds["latitude"].values.ravel()
-    lon = ds["longitude"].values.ravel()
-    x,y = merc.transform_points(ccrs.Geodetic(), lon[pix_idx], lat[pix_idx])[:,:2].T
-    bias = np.clip(y_pred - y_true, -60, 60)
-    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
-    add_background(ax, zoom=6)
+    lat  = ds["latitude"].values.ravel()
+    lon  = ds["longitude"].values.ravel()
+    x, y = merc.transform_points(ccrs.Geodetic(),
+                                 lon[pix_idx], lat[pix_idx])[:, :2].T
+    bias = np.clip(y_pred - y_true, -40, 40)
+
+    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6, 5))
+    add_background(ax, CA_EXTENT, zoom=6)
     ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
                   crs=ccrs.PlateCarree())
-    sc = ax.scatter(x, y, c=bias, cmap="seismic_r",
-                    norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
-                    s=1, marker="s", transform=merc, zorder=3)
-    cb = plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Days)")
+
+    sc = ax.scatter(x, y, c=bias,
+                    cmap="seismic_r",
+                    norm=TwoSlopeNorm(vmin=-40, vcenter=0, vmax=40),
+                    s=PIX_SZ, marker="s", transform=merc, zorder=3)
+
+    cb = plt.colorbar(sc, ax=ax, shrink=0.8)
     cb.ax.tick_params(labelsize=FONT_TICK)
     cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
     plt.tight_layout()
     plt.show()
+
 
 # ────────────────────────────────────────────────────────────
 # 4) Elev×Veg and boxplots
@@ -340,39 +373,49 @@ def transparent_histogram_by_cat(vals, cat, title):
     plt.title(title); plt.legend(); plt.tight_layout(); plt.show()
 
 
-def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag=None,
-                          elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500)):
-    bias = y_pred - y_true
-    elev_bin = np.digitize(elev, elev_edges)-1
-    vrange, nveg = GLOBAL_VEGRANGE, len(GLOBAL_VEGRANGE)
-    grid = np.full((len(elev_edges)-1, nveg), np.nan)
+def heat_bias_by_elev_veg(y_true, y_pred, elev, veg,
+                          elev_edges=(500,1000,1500,2000,2500,
+                                      3000,3500,4000,4500)):
+    bias     = y_pred - y_true
+    elev_bin = np.digitize(elev, elev_edges) - 1
+    vrange   = GLOBAL_VEGRANGE
+
+    grid = np.full((len(elev_edges)-1, len(vrange)), np.nan)
     for i in range(len(elev_edges)-1):
-        for j,v in enumerate(vrange):
-            sel = (elev_bin==i)&(veg==v)
-            if sel.any(): grid[i,j] = np.nanmean(bias[sel])
-    fig, ax = plt.subplots(figsize=(8,4))
-    im = ax.imshow(grid, cmap='seismic_r', vmin=-60, vmax=60,
-                   origin='lower', aspect='auto')
+        for j, v in enumerate(vrange):
+            m = (elev_bin == i) & (veg == v)
+            if m.any():
+                grid[i, j] = np.nanmean(bias[m])
+
+    show = np.round(grid)
+    show[np.isclose(show, 0)] = 0        # −0 → 0
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    im = ax.imshow(np.clip(grid, -15, 15), cmap='seismic_r',
+                   vmin=-15, vmax=15, origin='lower', aspect='auto')
+
+    # borders & numbers
     for i in range(grid.shape[0]):
         for j in range(grid.shape[1]):
-            ax.add_patch(plt.Rectangle((j-0.5,i-0.5),1,1,
-                                       ec='black',fc='none',lw=0.6))
-            if not np.isnan(grid[i,j]):
-                ax.text(j,i,f"{grid[i,j]:.0f}",
-                        ha='center',va='center',fontsize=FONT_LABEL)
-    ax.set_xticks(range(nveg))
+            ax.add_patch(plt.Rectangle((j-0.5, i-0.5), 1, 1,
+                                       ec='black', fc='none', lw=0.6))
+            if not np.isnan(show[i, j]):
+                ax.text(j, i, f"{int(show[i, j]):d}",
+                        ha='center', va='center', fontsize=FONT_LABEL)
+
+    ax.set_xticks(range(len(vrange)))
     ax.set_xticklabels([VEG_NAMES[v] for v in vrange],
                        rotation=45, ha='right', fontsize=FONT_TICK)
     ax.set_yticks(range(len(elev_edges)-1))
-    ax.set_yticklabels([f"{elev_edges[i]}–{elev_edges[i+1]} m"
-                        for i in range(len(elev_edges)-1)],
+    ax.set_yticklabels([f"{elev_edges[k]}–{elev_edges[k+1]} m"
+                        for k in range(len(elev_edges)-1)],
                        fontsize=FONT_TICK)
-    cb = plt.colorbar(im, ax=ax, label="Bias (Days)")
+
+    cb = plt.colorbar(im, ax=ax, shrink=0.8)
     cb.ax.tick_params(labelsize=FONT_TICK)
     cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
     plt.tight_layout()
     plt.show()
-
 
 # ────────────────────────────────────────────────────────────
 # 5) Feature matrix

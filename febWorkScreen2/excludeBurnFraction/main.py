@@ -4,6 +4,9 @@
 #  70 %/30 % category-split, whisker plots + uniform-scale maps
 #  burn_fraction **excluded** from predictors
 # ============================================================
+
+# backed up in excludeBurnFraction/main.py
+
 import time
 import requests
 import xarray as xr
@@ -23,9 +26,12 @@ import geopandas as gpd
 from typing import List, Dict
 
 # ────────────────────────────────────────────────────────────
-PIX_SZ = 2
-CA_LON_W, CA_LON_E = -125.0, -117.0
-CA_LAT_S, CA_LAT_N =   37.0,   43.0
+PIX_SZ = 1
+CA_LON_W, CA_LON_E = -124.5, -117.5   # west, east
+CA_LAT_S, CA_LAT_N =   37,   42.5   # south, north
+FONT_LABEL  = 14
+FONT_TICK   = 12
+FONT_LEGEND = 12
 
 # placeholder for veg types that actually occur
 GLOBAL_VEGRANGE: np.ndarray = np.array([], dtype=int)
@@ -70,76 +76,115 @@ def log(msg: str) -> None:
 # 1) Basic plotting helpers
 
 def plot_scatter(y_true, y_pred, title=None):
-    """Scatter w/ 1:1 line; no legend/title if title=None."""
-    plt.figure(figsize=(6,6))
-    plt.scatter(y_pred, y_true, alpha=0.3)
-    mn, mx = min(y_pred.min(), y_true.min()), max(y_pred.max(), y_true.max())
-    plt.plot([mn,mx],[mn,mx],'k--')
-    if title is not None:
+    fig, ax = plt.subplots(figsize=(6,6))
+    ax.scatter(y_pred, y_true, alpha=0.3)
+    mn, mx = float(min(y_pred.min(), y_true.min())), float(max(y_pred.max(), y_true.max()))
+    pad = (mx - mn) * 0.05
+    ax.plot([mn, mx], [mn, mx], 'k--', lw=1)
+    ax.set_xlim(mn - pad, mx + pad)
+    ax.set_ylim(mn - pad, mx + pad)
+    if title:
         rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-        bias = (y_pred-y_true).mean()
+        bias = (y_pred - y_true).mean()
         r2   = r2_score(y_true, y_pred)
-        plt.title(f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.3f}")
-    plt.xlabel("Predicted DSD")
-    plt.ylabel("Observed DSD")
+        ax.set_title(
+            f"{title}\nRMSE={rmse:.2f}, bias={bias:.2f}, R²={r2:.2f}",
+            fontsize=FONT_LABEL
+        )
+    ax.set_xlabel("Predicted DSD", fontsize=FONT_LABEL)
+    ax.set_ylabel("Observed DSD", fontsize=FONT_LABEL)
+    ax.tick_params(labelsize=FONT_TICK)
+    plt.tight_layout()
+    plt.show()
+
+def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx, gridsize=80):
+    """
+    Hexbin density scatter, 1:1 line, square axes.
+    """
+    mask = (cat == cat_idx)
+    x, y = y_pred[mask], y_true[mask]
+    fig, ax = plt.subplots(figsize=(6,6))
+    hb = ax.hexbin(x, y, gridsize=gridsize, cmap='inferno', mincnt=1)
+    mn, mx = float(min(x.min(), y.min())), float(max(x.max(), y.max()))
+    pad = (mx - mn) * 0.05
+    ax.plot([mn, mx], [mn, mx], 'k--', lw=1)
+    ax.set_xlim(mn - pad, mx + pad)
+    ax.set_ylim(mn - pad, mx + pad)
+    ax.set_aspect('equal', 'box')
+    ticks = ax.get_yticks()
+    ax.set_xticks(ticks)
+    ax.set_xlabel("Predicted DSD", fontsize=FONT_LABEL)
+    ax.set_ylabel("Observed DSD",  fontsize=FONT_LABEL)
+    ax.tick_params(labelsize=FONT_TICK)
+    cb = fig.colorbar(hb, ax=ax, shrink=0.8, label="Counts")
+    cb.ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
 
 def plot_bias_hist(y_true, y_pred, title=None, rng=(-100,300)):
-    """Bias histogram from –100 to 300, big N, and Mean/Std/R² title."""
-    res = y_pred - y_true
     fig, ax = plt.subplots(figsize=(6,4))
+    res = y_pred - y_true
     ax.hist(res, bins=50, range=rng, alpha=0.7)
     ax.axvline(res.mean(), color='k', ls='--', lw=2)
-    ax.text(0.02, 0.95, f"N={len(y_true)}", transform=ax.transAxes,
-            fontsize=14, va='top')
+    ax.text(0.02, 0.95, f"N={len(y_true)}",
+            transform=ax.transAxes, fontsize=FONT_LEGEND, va='top')
     mean, std, r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
-    ax.set_title(f"Mean={mean:.2f}, Std={std:.2f}, R²={r2:.3f}")
-    ax.set_xlabel("Bias (Pred − Obs, Days)")
-    ax.set_ylabel("Count")
+    ax.set_title(
+        f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}",
+        fontsize=FONT_LABEL
+    )
+    ax.set_xlabel("Bias (Pred − Obs, Days)", fontsize=FONT_LABEL)
+    ax.set_ylabel("Count", fontsize=FONT_LABEL)
+    ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
 
 def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
-    """Colour by cat; no legend or title."""
-    plt.figure(figsize=(6,6))
+    fig, ax = plt.subplots(figsize=(6,6))
     cols = {0:'red',1:'yellow',2:'green',3:'blue'}
-    mn, mx = min(y_pred.min(), y_true.min()), max(y_pred.max(), y_true.max())
-    for c,col in cols.items():
-        m = cat==c
+    mn, mx = float(min(y_pred.min(), y_true.min())), float(max(y_pred.max(), y_true.max()))
+    pad = (mx - mn) * 0.05
+    for c, col in cols.items():
+        m = cat == c
         if m.any():
-            plt.scatter(y_pred[m], y_true[m], c=col, alpha=0.4)
-    plt.plot([mn,mx],[mn,mx],'k--')
-    plt.xlabel("Predicted DSD")
-    plt.ylabel("Observed DSD")
+            ax.scatter(y_pred[m], y_true[m], c=col, alpha=0.4)
+    ax.plot([mn, mx], [mn, mx], 'k--', lw=1)
+    ax.set_xlim(mn - pad, mx + pad)
+    ax.set_ylim(mn - pad, mx + pad)
+    ax.set_xlabel("Predicted DSD", fontsize=FONT_LABEL)
+    ax.set_ylabel("Observed DSD", fontsize=FONT_LABEL)
+    ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
 
 def plot_top10_features(rf, names):
-    """Bar chart of RF feature_importances_; no title; NICE_NAME xticks."""
     imp = rf.feature_importances_
     idx = np.argsort(imp)[::-1][:10]
-    plt.figure(figsize=(8,4))
-    plt.bar(range(10), imp[idx])
-    plt.xticks(range(10),
-               [NICE_NAME.get(names[i], names[i]) for i in idx],
-               rotation=45, ha='right')
-    plt.ylabel("Feature importance")
+    fig, ax = plt.subplots(figsize=(8,4))
+    ax.bar(range(10), imp[idx])
+    ax.set_xticks(range(10))
+    ax.set_xticklabels(
+        [NICE_NAME.get(names[i], names[i]) for i in idx],
+        rotation=45, ha='right', fontsize=FONT_TICK
+    )
+    ax.set_ylabel("Feature Importance", fontsize=FONT_LABEL)
+    ax.tick_params(axis='y', labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
 
 def plot_permutation_importance(rf, X_val, y_val, names):
-    """Bar chart of permutation importances; no title; NICE_NAME xticks."""
-    res = permutation_importance(rf, X_val, y_val,
-                                 n_repeats=5, random_state=42)
+    res = permutation_importance(rf, X_val, y_val, n_repeats=5, random_state=42)
     imp = res.importances_mean
     idx = np.argsort(imp)[::-1][:10]
-    plt.figure(figsize=(8,4))
-    plt.bar(range(10), imp[idx])
-    plt.xticks(range(10),
-               [NICE_NAME.get(names[i], names[i]) for i in idx],
-               rotation=45, ha='right')
-    plt.ylabel("Permutation importance")
+    fig, ax = plt.subplots(figsize=(8,4))
+    ax.bar(range(10), imp[idx])
+    ax.set_xticks(range(10))
+    ax.set_xticklabels(
+        [NICE_NAME.get(names[i], names[i]) for i in idx],
+        rotation=45, ha='right', fontsize=FONT_TICK
+    )
+    ax.set_ylabel("Permutation Importance", fontsize=FONT_LABEL)
+    ax.tick_params(axis='y', labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
 
@@ -148,12 +193,7 @@ def plot_permutation_importance(rf, X_val, y_val, names):
 # 2) Top-5 binned feature scatter (Spearman + p-value formatting)
 
 def plot_top5_feature_scatter_binned(
-    rf,
-    X: np.ndarray,
-    y: np.ndarray,
-    cat: np.ndarray,
-    names: List[str],
-    n_bins: int = 20
+    rf, X, y, cat, names, n_bins: int = 20
 ):
     imp  = rf.feature_importances_
     top5 = np.argsort(imp)[::-1][:5]
@@ -162,12 +202,10 @@ def plot_top5_feature_scatter_binned(
     for rank, f_idx in enumerate(top5, start=1):
         fname = names[f_idx]
         pretty = NICE_NAME.get(fname, fname)
-
         x_all = X[:,f_idx]
         edges = np.linspace(x_all.min(), x_all.max(), n_bins+1)
         centers = 0.5*(edges[:-1]+edges[1:])
-
-        plt.figure(figsize=(7,5))
+        fig, ax = plt.subplots(figsize=(8,4))
         for c,col in cols.items():
             m = cat==c
             if not m.any(): continue
@@ -183,16 +221,15 @@ def plot_top5_feature_scatter_binned(
                 ysd.append(y[sel].std(ddof=0))
                 xv.append(centers[i])
             if not xv: continue
-
-            plt.errorbar(xv, ymu, yerr=ysd, fmt='o', ms=4, lw=1,
-                         color=col, ecolor=col, alpha=0.8,
-                         label=f"cat={c} (ρ={rho:.2f}, {p_label})")
-            plt.plot(xv, ymu, '-', color=col, alpha=0.7)
-
-        plt.xlabel(pretty)
-        plt.ylabel("Observed DSD (days)")
-        plt.title(f"Feature {rank}")
-        plt.legend()
+            ax.errorbar(xv, ymu, yerr=ysd, fmt='o', ms=5, lw=1.5,
+                        color=col, ecolor=col, alpha=0.8,
+                        label=f"c{c} (ρ={rho:.2f}, {p_label})")
+            ax.plot(xv, ymu, '-', color=col, alpha=0.7)
+        ax.set_xlabel(pretty, fontsize=FONT_LABEL)
+        ax.set_ylabel("Observed DSD (Days)", fontsize=FONT_LABEL)
+        ax.set_title(f"Feature {rank}", fontsize=FONT_LABEL+2)
+        ax.tick_params(axis='both', labelsize=FONT_TICK)
+        ax.legend(fontsize=FONT_LEGEND, loc="best")
         plt.tight_layout()
         plt.show()
 
@@ -225,7 +262,7 @@ x0, y0 = merc.transform_point(CA_LON_W, CA_LAT_S, ccrs.PlateCarree())
 x1, y1 = merc.transform_point(CA_LON_E, CA_LAT_N, ccrs.PlateCarree())
 CA_EXTENT = [x0, y0, x1, y1]
 
-def _add_background(ax, zoom=6):
+def add_background(ax, zoom=6):
     """
     Adds a satellite (or shaded-relief fallback) background plus state borders.
     The caller must set map extent beforehand.
@@ -233,65 +270,48 @@ def _add_background(ax, zoom=6):
     if USE_SAT:
         try:
             ax.add_image(TILER, zoom, interpolation="nearest")
-        except Exception as e:
-            print("⚠︎ satellite tiles skipped:", e)
+        except Exception:
             ax.add_feature(_RELIEF, zorder=0)
     else:
         ax.add_feature(_RELIEF, zorder=0)
+    STATES.boundary.plot(ax=ax, linewidth=0.6, edgecolor="black", zorder=2)
 
-    # state borders
-    states_shp = "data/cb_2022_us_state_500k/cb_2022_us_state_500k.shp"
-    _states = gpd.read_file(states_shp).to_crs(epsg=4326)
-    _states.boundary.plot(
-        ax=ax,
-        linewidth=0.6,
-        edgecolor="black",
-        zorder=2,
-        transform=ccrs.PlateCarree()
-    )
-
-def dod_map_ca(ds, pix_idx, values, title,
+def dod_map_ca(ds, pix_idx, values, title=None,
                cmap="Blues", vmin=50, vmax=250):
-    """
-    Light-blue → dark-blue DSD map on a common 50…250 day scale.
-    """
     merc = ccrs.epsg(3857)
-    lat = ds["latitude"].values.ravel(); lon = ds["longitude"].values.ravel()
-    x, y = merc.transform_points(ccrs.Geodetic(),
-                                 lon[pix_idx], lat[pix_idx])[:, :2].T
+    lat = ds["latitude"].values.ravel()
+    lon = ds["longitude"].values.ravel()
+    x,y = merc.transform_points(ccrs.Geodetic(), lon[pix_idx], lat[pix_idx])[:,:2].T
     fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
-    _add_background(ax, zoom=6)
+    add_background(ax, zoom=6)
     ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
                   crs=ccrs.PlateCarree())
-    sc = ax.scatter(
-        x, y, c=values, cmap=cmap,
-        vmin=vmin, vmax=vmax,
-        s=PIX_SZ, marker="s", transform=merc, zorder=3
-    )
-    plt.colorbar(sc, ax=ax, shrink=0.8, label="DSD (days)")
-    ax.set_title(title); plt.tight_layout(); plt.show()
+    sc = ax.scatter(x, y, c=values, cmap=cmap, vmin=vmin, vmax=vmax,
+                    s=1, marker="s", transform=merc, zorder=3)
+    cb = plt.colorbar(sc, ax=ax, shrink=0.8, label="DSD (Days)")
+    cb.ax.tick_params(labelsize=FONT_TICK)
+    cb.set_label("DSD (Days)", fontsize=FONT_LABEL)
+    plt.tight_layout()
+    plt.show()
 
-def bias_map_ca(ds, pix_idx, y_true, y_pred, title):
-    """
-    Per-pixel bias (Pred − Obs) clipped to ±60 days, with blue=positive, red=negative.
-    """
+def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None):
     merc = ccrs.epsg(3857)
-    lat = ds["latitude"].values.ravel(); lon = ds["longitude"].values.ravel()
-    x, y = merc.transform_points(ccrs.Geodetic(),
-                                 lon[pix_idx], lat[pix_idx])[:, :2].T
+    lat = ds["latitude"].values.ravel()
+    lon = ds["longitude"].values.ravel()
+    x,y = merc.transform_points(ccrs.Geodetic(), lon[pix_idx], lat[pix_idx])[:,:2].T
     bias = np.clip(y_pred - y_true, -60, 60)
     fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
-    _add_background(ax, zoom=6)
+    add_background(ax, zoom=6)
     ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
                   crs=ccrs.PlateCarree())
-    sc = ax.scatter(
-        x, y, c=bias, cmap="seismic_r",
-        norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
-        s=PIX_SZ, marker="s", transform=merc, zorder=3
-    )
-    plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Pred-Obs, days)")
-    #ax.set_title(title); 
-    plt.tight_layout(); plt.show()
+    sc = ax.scatter(x, y, c=bias, cmap="seismic_r",
+                    norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
+                    s=1, marker="s", transform=merc, zorder=3)
+    cb = plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Days)")
+    cb.ax.tick_params(labelsize=FONT_TICK)
+    cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
+    plt.tight_layout()
+    plt.show()
 
 # ────────────────────────────────────────────────────────────
 # 4) Elev×Veg and boxplots
@@ -319,32 +339,40 @@ def transparent_histogram_by_cat(vals, cat, title):
     plt.xlabel("DSD (days)"); plt.ylabel("relative freq.")
     plt.title(title); plt.legend(); plt.tight_layout(); plt.show()
 
-def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, title=None,
+
+def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag=None,
                           elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500)):
     bias = y_pred - y_true
-    elev_bin = np.digitize(elev, elev_edges) - 1
-    vrange = GLOBAL_VEGRANGE; nveg = len(vrange)
-    grid = np.full((len(elev_edges)-1,nveg), np.nan)
+    elev_bin = np.digitize(elev, elev_edges)-1
+    vrange, nveg = GLOBAL_VEGRANGE, len(GLOBAL_VEGRANGE)
+    grid = np.full((len(elev_edges)-1, nveg), np.nan)
     for i in range(len(elev_edges)-1):
         for j,v in enumerate(vrange):
             sel = (elev_bin==i)&(veg==v)
-            if sel.any():
-                grid[i,j] = np.nanmean(bias[sel])
-    plt.figure(figsize=(8,4))
-    im = plt.imshow(grid, cmap='seismic_r', vmin=-60, vmax=60,
-                    origin='lower', aspect='auto')
+            if sel.any(): grid[i,j] = np.nanmean(bias[sel])
+    fig, ax = plt.subplots(figsize=(8,4))
+    im = ax.imshow(grid, cmap='seismic_r', vmin=-60, vmax=60,
+                   origin='lower', aspect='auto')
     for i in range(grid.shape[0]):
         for j in range(grid.shape[1]):
-            plt.gca().add_patch(plt.Rectangle((j-0.5,i-0.5),1,1,
-                                              ec='black',fc='none',lw=0.6))
+            ax.add_patch(plt.Rectangle((j-0.5,i-0.5),1,1,
+                                       ec='black',fc='none',lw=0.6))
             if not np.isnan(grid[i,j]):
-                plt.text(j, i, f"{grid[i,j]:.0f}", ha='center',va='center',fontsize=6)
-    plt.xticks(range(nveg), [VEG_NAMES[v] for v in vrange], rotation=45,ha='right')
-    plt.yticks(range(len(elev_edges)-1),
-               [f"{elev_edges[i]}–{elev_edges[i+1]} m" for i in range(len(elev_edges)-1)])
-    plt.colorbar(im, label="Bias (days)")
+                ax.text(j,i,f"{grid[i,j]:.0f}",
+                        ha='center',va='center',fontsize=FONT_LABEL)
+    ax.set_xticks(range(nveg))
+    ax.set_xticklabels([VEG_NAMES[v] for v in vrange],
+                       rotation=45, ha='right', fontsize=FONT_TICK)
+    ax.set_yticks(range(len(elev_edges)-1))
+    ax.set_yticklabels([f"{elev_edges[i]}–{elev_edges[i+1]} m"
+                        for i in range(len(elev_edges)-1)],
+                       fontsize=FONT_TICK)
+    cb = plt.colorbar(im, ax=ax, label="Bias (Days)")
+    cb.ax.tick_params(labelsize=FONT_TICK)
+    cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
     plt.tight_layout()
     plt.show()
+
 
 # ────────────────────────────────────────────────────────────
 # 5) Feature matrix
@@ -418,6 +446,7 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names):
         m = cat_te==c
         if not m.any(): continue
         plot_scatter(    y_te[m],  yhat_te[m],    title=None)
+        plot_scatter_density_by_cat(y_te, yhat_te, cat_te, cat_idx=c)
         plot_bias_hist(  y_te[m],  yhat_te[m],    title=None)
 
     # B) pixel-bias maps (no titles)
@@ -439,7 +468,7 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names):
         if not m.any(): continue
         elev = ds["Elevation"].values.ravel(order='C')[ok][te_idx][m]
         veg  = ds["VegTyp"]   .values.ravel(order='C')[ok][te_idx][m].astype(int)
-        heat_bias_by_elev_veg(y_te[m], yhat_te[m], elev, veg, title=None)
+        heat_bias_by_elev_veg(y_te[m], yhat_te[m], elev, veg, tag=None)
 
     # D) feature importance
     plot_top10_features(rf, feat_names)
@@ -468,17 +497,16 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names):
     } for c in metrics}
 
     fig = plt.figure(figsize=(15,4))
-    for j,(key,lab) in enumerate([('bias','Mean Bias'),
-                                  ('rmse','RMSE'),
+    for j,(key,lab) in enumerate([('bias','Mean Bias (days)'),
+                                  ('rmse','RMSE (days)'),
                                   ('r2','R²')], 1):
         ax = fig.add_subplot(1,3,j)
+        ax.tick_params(labelsize=FONT_TICK+2)
         for c,col in {0:'black',1:'blue',3:'red'}.items():
             ax.hist(metrics[c][key], bins=10, alpha=0.45, color=col)
             ax.axvline(orig[c][key], color=col, ls='-', lw=2)
-        # cat2 line-only
         ax.axvline(orig[2][key], color='grey', ls='-', lw=2)
-        ax.set_xlabel(lab)
-    fig.suptitle(f"Experiment 2 (k={k})")
+        ax.set_xlabel(lab, fontsize=FONT_LABEL)
     plt.tight_layout()
     plt.show()
 
