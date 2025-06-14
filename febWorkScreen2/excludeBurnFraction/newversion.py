@@ -14,6 +14,7 @@ import numpy as np
 import numpy.random as npr
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
+import matplotlib.ticker as mticker
 from scipy.stats import ranksums, spearmanr
 from scipy.stats import gaussian_kde
 from sklearn.ensemble import RandomForestRegressor
@@ -286,11 +287,20 @@ x0, y0 = merc.transform_point(CA_LON_W, CA_LAT_S, ccrs.PlateCarree())
 x1, y1 = merc.transform_point(CA_LON_E, CA_LAT_N, ccrs.PlateCarree())
 CA_EXTENT = [x0, y0, x1, y1]
 
-def add_background(ax, zoom=6):
+# ────────────────────────────────────────────────────────────
+#  replace the whole add_background helper with this version
+# ────────────────────────────────────────────────────────────
+def add_background(ax, extent_merc=None, zoom: int = 6):
     """
-    Adds a satellite (or shaded-relief fallback) background plus state borders.
-    The caller must set map extent beforehand.
+    Paint a satellite/shaded-relief backdrop + state borders.
+
+    • The 2nd positional argument (*extent_merc*) is optional and ignored – it
+      is kept **only** so calls like  add_background(ax, CA_EXTENT, zoom=6)
+      do not raise “multiple values for argument 'zoom'”.
     """
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
+                  crs=ccrs.PlateCarree())
+
     if USE_SAT:
         try:
             ax.add_image(TILER, zoom, interpolation="nearest")
@@ -298,7 +308,10 @@ def add_background(ax, zoom=6):
             ax.add_feature(_RELIEF, zorder=0)
     else:
         ax.add_feature(_RELIEF, zorder=0)
-    STATES.boundary.plot(ax=ax, linewidth=0.6, edgecolor="black", zorder=2)
+
+    STATES.boundary.plot(ax=ax, linewidth=0.6,
+                         edgecolor="black", zorder=2)
+
 
 def dod_map_ca(ds, pix_idx, values, title=None,
                cmap="Blues", vmin=50, vmax=250):
@@ -372,33 +385,36 @@ def transparent_histogram_by_cat(vals, cat, title):
 
 
 def heat_bias_by_elev_veg(y_true, y_pred, elev, veg,
+                          tag=None,                         # tag ignored
                           elev_edges=(500,1000,1500,2000,2500,
                                       3000,3500,4000,4500)):
-    bias     = y_pred - y_true
-    elev_bin = np.digitize(elev, elev_edges) - 1
-    vrange   = GLOBAL_VEGRANGE
+    bias      = y_pred - y_true
+    elev_bin  = np.digitize(elev, elev_edges) - 1
+    vrange    = GLOBAL_VEGRANGE
 
     grid = np.full((len(elev_edges)-1, len(vrange)), np.nan)
     for i in range(len(elev_edges)-1):
         for j, v in enumerate(vrange):
-            m = (elev_bin == i) & (veg == v)
-            if m.any():
-                grid[i, j] = np.nanmean(bias[m])
+            sel = (elev_bin == i) & (veg == v)
+            if sel.any():
+                grid[i, j] = np.nanmean(bias[sel])
 
-    show = np.round(grid)
-    show[np.isclose(show, 0)] = 0        # −0 → 0
+    # ── display helpers ──────────────────────────────────────────
+    grid_lbl        = np.round(grid)
+    grid_lbl[np.isclose(grid_lbl, 0)] = 0        # “-0” → “0”
+    norm            = TwoSlopeNorm(vmin=-15, vcenter=0, vmax=15)
 
     fig, ax = plt.subplots(figsize=(8, 4))
-    im = ax.imshow(np.clip(grid, -15, 15), cmap='seismic_r',
-                   vmin=-15, vmax=15, origin='lower', aspect='auto')
+    im  = ax.imshow(np.clip(grid, -15, 15), cmap='seismic_r',
+                    norm=norm, origin='lower', aspect='auto')
 
-    # borders & numbers
+    # draw cell borders and integer labels
     for i in range(grid.shape[0]):
         for j in range(grid.shape[1]):
             ax.add_patch(plt.Rectangle((j-0.5, i-0.5), 1, 1,
                                        ec='black', fc='none', lw=0.6))
-            if not np.isnan(show[i, j]):
-                ax.text(j, i, f"{int(show[i, j]):d}",
+            if not np.isnan(grid_lbl[i, j]):
+                ax.text(j, i, f"{int(grid_lbl[i, j]):d}",
                         ha='center', va='center', fontsize=FONT_LABEL)
 
     ax.set_xticks(range(len(vrange)))
@@ -409,12 +425,14 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg,
                         for k in range(len(elev_edges)-1)],
                        fontsize=FONT_TICK)
 
-    cb = plt.colorbar(im, ax=ax, shrink=0.8)
+    # ── colour-bar with the full ±15 span ───────────────────────
+    cb = plt.colorbar(im, ax=ax, shrink=.8, extend='both')
+    cb.set_ticks([-15, -10, -5, 0, 5, 10, 15])   # <- forces the labels
     cb.ax.tick_params(labelsize=FONT_TICK)
     cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
+
     plt.tight_layout()
     plt.show()
-
 
 # ────────────────────────────────────────────────────────────
 # 5) Feature matrix
