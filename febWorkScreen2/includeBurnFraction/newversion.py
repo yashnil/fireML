@@ -428,7 +428,7 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg,
                        fontsize=FONT_TICK)
 
     # ── colour-bar with the full ±15 span ───────────────────────
-    cb = plt.colorbar(im, ax=ax, shrink=.8, extend='both')
+    cb = plt.colorbar(im, ax=ax, pad=0.02)
     cb.set_ticks([-15, -10, -5, 0, 5, 10, 15])   # <- forces the labels
     cb.ax.tick_params(labelsize=FONT_TICK)
     cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
