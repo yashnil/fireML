@@ -273,7 +273,7 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg,
                         for k in range(len(elev_edges)-1)],
                        fontsize=FONT_TICK)
 
-    cb = plt.colorbar(im, ax=ax, shrink=0.8)
+    cb = plt.colorbar(im, ax=ax)
     cb.ax.tick_params(labelsize=FONT_TICK)
     cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
     plt.tight_layout()
