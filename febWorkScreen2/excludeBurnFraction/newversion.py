@@ -100,7 +100,7 @@ def plot_scatter(y_true, y_pred, title=None):
     plt.show()
 
 def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx,
-                                point_size: int = 16,
+                                point_size: int = 4,
                                 cmap: str = "inferno",
                                 kde_sample_max: int = 40_000):
     """
@@ -408,14 +408,24 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg,
     im  = ax.imshow(np.clip(grid, -15, 15), cmap='seismic_r',
                     norm=norm, origin='lower', aspect='auto')
 
-    # draw cell borders and integer labels
+    # cell borders + integer labels
     for i in range(grid.shape[0]):
         for j in range(grid.shape[1]):
+
             ax.add_patch(plt.Rectangle((j-0.5, i-0.5), 1, 1,
                                        ec='black', fc='none', lw=0.6))
-            if not np.isnan(grid_lbl[i, j]):
-                ax.text(j, i, f"{int(grid_lbl[i, j]):d}",
-                        ha='center', va='center', fontsize=FONT_LABEL)
+            
+            val = grid_lbl[i, j]
+            if np.isnan(val):
+                continue
+
+            # ── new threshold: white if |val| ≥ 8 ───────────────
+            txt_color = 'white' if abs(val) >= 8 else 'black'
+
+            ax.text(j, i, f"{int(val):d}",
+                    ha='center', va='center',
+                    fontsize=FONT_LABEL,
+                    color=txt_color)
 
     ax.set_xticks(range(len(vrange)))
     ax.set_xticklabels([VEG_NAMES[v] for v in vrange],
