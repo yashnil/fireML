@@ -71,6 +71,12 @@ NICE_NAME["VegTyp"] = "Vegetation Type"
 NICE_NAME["sweWinter"] = "Winter SWE"
 NICE_NAME["burn_fraction"] = "Burn Fraction"
 
+# ── hard-coded units for the Top-5 features ───────────────────────────
+NICE_NAME["peakValue"]               = "Peak SWE (mm)"
+NICE_NAME["aorcSpringTemperature"]   = "Spring Temperature (K)"
+NICE_NAME["aorcWinterPrecipitation"] = "Winter Precipitation (mm/day)"
+NICE_NAME["aorcSpringShortwave"]     = "Spring Shortwave↓ (W/m⁻²)"
+
 # ────────────────────────────────────────────────────────────
 #  pretty timer
 # ────────────────────────────────────────────────────────────
@@ -634,6 +640,11 @@ def gather_features_nobf(ds, target="DOD"):
         if v.lower() in excl:
             continue
         da = ds[v]
+
+        # ---- NEW: unit conversion (mm s⁻¹ → mm day⁻¹) ------------
+        if v == "aorcWinterPrecipitation":
+            da = da * 86_400.0          # 60 s * 60 min * 24 h
+
         if set(da.dims) == {"year", "pixel"}:
             feats[v] = da.values
         elif set(da.dims) == {"pixel"}:
