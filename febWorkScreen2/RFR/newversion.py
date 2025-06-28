@@ -216,6 +216,70 @@ def plot_bias_hist(y_true, y_pred, title=None, rng=(-100, 300),
     plt.tight_layout()
     plt.show()
 
+# ─────────────────────────────────────────────────────────────
+#  Snow-event frequency proxy from seasonal means
+# ─────────────────────────────────────────────────────────────
+def snowfreq_from_means(wprec_mmday, wtemp_K,
+                        mm_per_event=5.0,  winter_days=90.0):
+    """
+    Heuristic count of snow days per winter using *seasonal* means:
+        • scale precip by mm_per_event to turn mm into “events”
+        • weight by a logistic temp-based snow fraction
+    """
+    # temperature in °C
+    t_C = wtemp_K - 273.15
+    # logistic weight: ≈1 when T≤0 °C, 0 when T≥4 °C
+    weight = 1.0 / (1.0 + np.exp((t_C - 2.0) / 1.0))
+    # proxy in "days" (cap at winter_days for realism)
+    proxy = np.minimum(wprec_mmday / mm_per_event * weight, winter_days)
+    return proxy.astype(np.float32)
+
+# ─────────────────────────────────────────────────────────────
+#  Bias histogram (metrics-only title + console tag)
+# ─────────────────────────────────────────────────────────────
+def bias_hist_single(y_true, y_pred,
+                     sel, burn_idx, snow_idx,
+                     rng=(-100, 100), bins=50, tick_limit=100):
+    """
+    Draw a single histogram of (y_pred – y_true) where *sel* is True.
+
+    • Title shows only Mean Bias, Bias Std, and R².
+    • A descriptive line (burn category & snow band) is printed to stdout.
+    """
+    if sel.sum() == 0:
+        print(f"[SKIP] burn c{burn_idx}, snow {snow_idx}: N=0")
+        return
+
+    res   = y_pred[sel] - y_true[sel]
+    mean  = res.mean()
+    std   = res.std()
+    r2    = r2_score(y_true[sel], y_pred[sel])
+
+    # ── console tag for later classification ────────────────
+    snow_lbl = {0: "Low", 1: "Moderate", 2: "High"}
+    print(f"[PLOT] burn c{burn_idx}, {snow_lbl[snow_idx]} snowfall  "
+          f"→ N={sel.sum():5d},  μ={mean:7.2f},  σ={std:6.2f},  R²={r2:5.3f}")
+
+    # ── the plot itself ─────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(res, bins=bins, range=rng, alpha=0.7)
+    ax.axvline(mean, color='k', ls='--', lw=2)
+
+    ax.set_title(f"Mean Bias={mean:.2f},  Bias Std={std:.2f},  R²={r2:.2f}",
+                 fontsize=FONT_LABEL)
+    ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
+    ax.set_ylabel("Count",       fontsize=FONT_LABEL)
+
+    # trimmed x-tick labels like your original helper
+    xt = ax.get_xticks()
+    ax.set_xticklabels([f'{t:g}' if abs(t) <= tick_limit else '' for t in xt])
+
+    ax.tick_params(labelsize=FONT_TICK)
+    plt.tight_layout()
+    plt.show()
+
+
+
 def plot_top10_features(rf, names):
     imp = rf.feature_importances_
     idx = np.argsort(imp)[::-1][:10]
@@ -847,6 +911,16 @@ def rf_unburned_experiment(
 
         heat_bias_by_elev_veg(Yv[m], y_hat_all[m], elev, veg,
                       f"Elev×Veg Bias – cat {c} (thr={thr})")
+        
+        # ─── NEW: 12 individual snow-stratified bias plots ───
+        for s in (0, 1, 2):
+            mask = (cat == c) & (snow_cat == s)
+            bias_hist_single(
+                Yv, y_hat_all,
+                sel       = mask,
+                burn_idx  = c,
+                snow_idx  = s
+            )
 
     if 0 in bias_by_cat:
         print("\nWilcoxon rank‑sum (bias difference vs cat 0)")
@@ -982,6 +1056,24 @@ if __name__ == "__main__":
 
     # build feature matrix (burn_fraction excluded)
     X_all, y_all, feat_names, ok = flatten_nobf(ds, "DOD")
+
+    # ─── snowfall-frequency proxy stratification ─────────────────
+    log("building snow-event-frequency proxy from seasonal means …")
+    # convert precip from mm s⁻¹ → mm day⁻¹
+    wprec_mmday = ds["aorcWinterPrecipitation"].values * 86_400.0
+    wtemp_K     = ds["aorcWinterTemperature"].values
+
+    snowfreq    = snowfreq_from_means(wprec_mmday, wtemp_K)      # (year,pixel)
+
+    # --- flatten + mask to 'ok' ---------------------------------
+    snowfreq_vals = snowfreq.ravel(order="C")[ok]
+
+    low_th , high_th = np.percentile(snowfreq_vals, [33, 67])
+    snow_cat = np.digitize(snowfreq_vals, [low_th, high_th])      # 0,1,2
+
+    print(f"[snow-proxy] 33 %={low_th:.1f} days, 67 %={high_th:.1f} days")
+
+    ds["winterSnowFreqProxy"] = (("year", "pixel"), snowfreq)
 
     log(
         f"feature matrix ready – {ok.sum()} valid samples, "
