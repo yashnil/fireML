@@ -172,13 +172,35 @@ def snowfreq_from_means(wprec_mmday, wtemp_K,
         • scale precip by mm_per_event to turn mm into “events”
         • weight by a logistic temp-based snow fraction
     """
-    # temperature in °C
-    t_C = wtemp_K - 273.15
     # logistic weight: ≈1 when T≤0 °C, 0 when T≥4 °C
-    weight = 1.0 / (1.0 + np.exp((t_C - 2.0) / 1.0))
+    weight = snow_fraction_jordan(wtemp_K)
     # proxy in "days" (cap at winter_days for realism)
     proxy = np.minimum(wprec_mmday / mm_per_event * weight, winter_days)
     return proxy.astype(np.float32)
+
+def snow_fraction_jordan(temp_K,
+                         t_snow=0.5,    # °C – all-snow below this
+                         t_rain=2.5):   # °C – all-rain above this
+    """
+    Linear rain/snow partitioning after Jordan (1991, SNTHERM.89).
+
+    Parameters
+    ----------
+    temp_K : ndarray
+        Air temperature [K].
+    t_snow, t_rain : float
+        Lower / upper temperature bounds for fractional snow (°C).
+
+    Returns
+    -------
+    fsnow : ndarray
+        Fraction (0‒1) of precipitation that falls as snow.
+        1  below t_snow, 0 above t_rain, linear transition in between.
+    """
+    t_C = temp_K - 273.15
+    # (T_rain − T) / (T_rain − T_snow), then clip to 0‒1 just in case
+    fsnow = np.clip((t_rain - t_C) / (t_rain - t_snow), 0.0, 1.0)
+    return fsnow.astype(np.float32)
 
 def bias_hist_single(y_true, y_pred,
                      sel, burn_idx, snow_idx,
