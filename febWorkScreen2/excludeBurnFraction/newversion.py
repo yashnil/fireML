@@ -409,6 +409,36 @@ def dod_map_ca(ds, pix_idx, values, title=None,
     plt.tight_layout()
     plt.show()
 
+# ── helper: aggregate a 1-D sample vector to a per-pixel mean ────────────
+def mean_per_pixel(pix_idx: np.ndarray,
+                   values:   np.ndarray,
+                   n_pix:    int) -> np.ndarray:
+    """
+    Parameters
+    ----------
+    pix_idx : 1-D array of pixel IDs, one per sample row
+    values  : 1-D array of the same length with the variable to average
+    n_pix   : total number of pixels in the dataset (ds.sizes['pixel'])
+
+    Returns
+    -------
+    mean_val : np.ndarray  (length = n_pix)
+        NaN for pixels that have no valid samples.
+    """
+    mean_val = np.full(n_pix, np.nan, dtype=np.float32)
+    count    = np.zeros(n_pix,  dtype=np.uint32)
+
+    for pid, val in zip(pix_idx, values):
+        if np.isfinite(val):
+            if np.isnan(mean_val[pid]):
+                mean_val[pid] = 0.0
+            mean_val[pid] += val
+            count[pid]    += 1
+
+    mask = count > 0
+    mean_val[mask] /= count[mask]
+    return mean_val
+
 def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None):
     """Pixel-bias map, colour-limited to ±40 days."""
     merc = ccrs.epsg(3857)
@@ -611,17 +641,33 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
             )
 
     # B) pixel-bias maps (no titles)
+    
+    # ── NEW: pixel-mean bias maps ───────────────────────────────
     pix_full = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
-    pix_ok   = pix_full[ok]
-    for c in (None, *[0,1,2,3]):
-        if c is None:
-            idx = pix_ok[te_idx]
-            ytrue, ypred = y_te, yhat_te
-        else:
-            mask = cat_te==c
-            idx = pix_ok[te_idx][mask]
-            ytrue, ypred = y_te[mask], yhat_te[mask]
-        bias_map_ca(ds, idx, ytrue, ypred, title=None)
+    pix_ok    = pix_full[ok]
+    n_pix     = ds.sizes["pixel"]
+
+    # (a) GLOBAL – all test rows pooled
+    obs_mean_all  = mean_per_pixel(pix_ok[te_idx], y_te,     n_pix)
+    pred_mean_all = mean_per_pixel(pix_ok[te_idx], yhat_te,  n_pix)
+    pix_plot      = np.where(~np.isnan(obs_mean_all))[0]
+    bias_map_ca(ds, pix_plot,
+                obs_mean_all [pix_plot],
+                pred_mean_all[pix_plot],
+                title=None)              # uniform colour-scale ±40 set in helper
+
+    # (b) PER-CATEGORY maps
+    for c in (0, 1, 2, 3):
+        mask = cat_te == c
+        if not mask.any():
+            continue
+        obs_mean_c  = mean_per_pixel(pix_ok[te_idx][mask], y_te[mask],     n_pix)
+        pred_mean_c = mean_per_pixel(pix_ok[te_idx][mask], yhat_te[mask],  n_pix)
+        pix_c       = np.where(~np.isnan(obs_mean_c))[0]
+        bias_map_ca(ds, pix_c,
+                    obs_mean_c [pix_c],
+                    pred_mean_c[pix_c],
+                    title=None)
 
     # C) Elev×Veg per test-category
     for c in (0,1,2,3):
@@ -692,8 +738,8 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
 # ────────────────────────────────────────────────────────────
 # MAIN
 if __name__=="__main__":
-    log("loading final_dataset4.nc …")
-    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset4.nc")
+    log("loading final_dataset5.nc …")
+    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset5.nc")
 
     # build veg-range
     veg_all = ds["VegTyp"].values.ravel(order='C').astype(int)

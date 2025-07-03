@@ -614,6 +614,36 @@ def dod_map_ca(ds, pix_idx, values, title=None,
     plt.tight_layout()
     plt.show()
 
+# ── helper: aggregate a 1-D sample vector to a per-pixel mean ────────────
+def mean_per_pixel(pix_idx: np.ndarray,
+                   values:   np.ndarray,
+                   n_pix:    int) -> np.ndarray:
+    """
+    Parameters
+    ----------
+    pix_idx : 1-D array of pixel IDs, one per sample row
+    values  : 1-D array of the same length with the variable to average
+    n_pix   : total number of pixels in the dataset (ds.sizes['pixel'])
+
+    Returns
+    -------
+    mean_val : np.ndarray  (length = n_pix)
+        NaN for pixels that have no valid samples.
+    """
+    mean_val = np.full(n_pix, np.nan, dtype=np.float32)
+    count    = np.zeros(n_pix,  dtype=np.uint32)
+
+    for pid, val in zip(pix_idx, values):
+        if np.isfinite(val):
+            if np.isnan(mean_val[pid]):
+                mean_val[pid] = 0.0
+            mean_val[pid] += val
+            count[pid]    += 1
+
+    mask = count > 0
+    mean_val[mask] /= count[mask]
+    return mean_val
+
 def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None):
     merc = ccrs.epsg(3857)
     lat = ds["latitude"].values.ravel()
@@ -870,13 +900,17 @@ def rf_unburned_experiment(
 
     # pixel‑level bias map
     pix_full = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
-    bias_map_ca(
-        ds,
-        pix_full[ok],
-        Yv,
-        y_hat_all,
-        f"Pixel Bias: ALL data (thr={thr})",
-    )
+    # ---- NEW ----
+    n_pix     = ds.sizes["pixel"]
+    obs_mean  = mean_per_pixel(pix_full[ok], Yv,        n_pix)
+    pred_mean = mean_per_pixel(pix_full[ok], y_hat_all, n_pix)
+
+    pix_plot  = np.where(~np.isnan(obs_mean))[0]        # pixels that have data
+    bias_map_ca(ds,
+                pix_plot,
+                obs_mean [pix_plot],   # y_true  (mean observed DSD)
+                pred_mean[pix_plot],   # y_pred  (mean predicted DSD)
+                f"Pixel Bias: ALL data (thr={thr})")
 
     # ── C. per‑cat scatter / hist, Wilcoxon tests, DoD maps, Bias maps ──
     bias_all = y_hat_all - Yv
@@ -900,30 +934,32 @@ def rf_unburned_experiment(
             title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}"
         )
 
-        # observed & predicted DoD maps
-        dod_map_ca(
-            ds,
-            pix_valid[m],
-            Yv[m],
-            f"Observed DSD – cat {c} (thr={thr})",
-            cmap="Blues",
-        )
-        dod_map_ca(
-            ds,
-            pix_valid[m],
-            y_hat_all[m],
-            f"Predicted DSD – cat {c} (thr={thr})",
-            cmap="Blues",
-        )
+        # aggregate only the rows belonging to this category
+        obs_c_mean  = mean_per_pixel(pix_valid[m], Yv[m],        n_pix)
+        pred_c_mean = mean_per_pixel(pix_valid[m], y_hat_all[m], n_pix)
+        pix_c = np.where(~np.isnan(obs_c_mean))[0]
 
-        # per‑category pixel‑bias map
-        bias_map_ca(
-            ds,
-            pix_valid[m],
-            Yv[m],
-            y_hat_all[m],
-            f"Pixel Bias – cat {c} (thr={thr})",
-        )
+        # (A) mean observed DSD
+        dod_map_ca(ds,
+                pix_c,
+                obs_c_mean[pix_c],
+                f"Observed DSD – cat {c} (thr={thr})",
+                cmap="Blues")
+
+        # (B) mean predicted DSD
+        dod_map_ca(ds,
+                pix_c,
+                pred_c_mean[pix_c],
+                f"Predicted DSD – cat {c} (thr={thr})",
+                cmap="Blues")
+
+        # (C) mean pixel bias
+        bias_map_ca(ds,
+                    pix_c,
+                    obs_c_mean [pix_c],    # y_true  (mean observed)
+                    pred_c_mean[pix_c],    # y_pred  (mean predicted)
+                    f"Pixel Bias – cat {c} (thr={thr})")
+
 
         # per‑category Elev×Veg box‑plot
         elev = ds["Elevation"].values.ravel(order="C")[ok][m]
@@ -1059,8 +1095,8 @@ def rf_unburned_experiment(
 #  MAIN
 # ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    log("loading final_dataset4.nc …")
-    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset4.nc")
+    log("loading final_dataset5.nc …")
+    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset5.nc")
     # ---- fixed mercator extent that encloses the CA rectangle ----
     merc   = ccrs.epsg(3857)
     x0, y0 = merc.transform_point(CA_LON_W, CA_LAT_S, ccrs.PlateCarree())

@@ -207,6 +207,36 @@ def dod_map_ca(ds, pix_idx, values,
     cbar.ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout(); plt.show()
 
+# ── helper: aggregate a 1-D sample vector to a per-pixel mean ────────────
+def mean_per_pixel(pix_idx: np.ndarray,
+                   values:   np.ndarray,
+                   n_pix:    int) -> np.ndarray:
+    """
+    Parameters
+    ----------
+    pix_idx : 1-D array of pixel IDs, one per sample row
+    values  : 1-D array of the same length with the variable to average
+    n_pix   : total number of pixels in the dataset (ds.sizes['pixel'])
+
+    Returns
+    -------
+    mean_val : np.ndarray  (length = n_pix)
+        NaN for pixels that have no valid samples.
+    """
+    mean_val = np.full(n_pix, np.nan, dtype=np.float32)
+    count    = np.zeros(n_pix,  dtype=np.uint32)
+
+    for pid, val in zip(pix_idx, values):
+        if np.isfinite(val):
+            if np.isnan(mean_val[pid]):
+                mean_val[pid] = 0.0
+            mean_val[pid] += val
+            count[pid]    += 1
+
+    mask = count > 0
+    mean_val[mask] /= count[mask]
+    return mean_val
+
 def bias_map_ca(ds, pix_idx, y_true, y_pred):
     """Bias map capped at ±40 days (colour) and using PIX_SZ symbol size."""
     merc = ccrs.epsg(3857)
@@ -366,32 +396,65 @@ def mlp_unburned_experiment(X, y, cat2d, ok, ds, feat_names, unburned_max_cat=0)
     plot_scatter(y_te, mlp.predict(X_te_s), f"MLP TEST  (cat ≤ {thr})")
     plot_bias_hist(y_te, mlp.predict(X_te_s))
 
-    # B) ALL‐DATA
+    # ------------------------------------------------------------------
+    # B) ALL-DATA  (unchanged scatter + hist)
+    # ------------------------------------------------------------------
     y_all_hat = mlp.predict(X_all_s)
     plot_scatter_by_cat(Yv, y_all_hat, cat, f"ALL DATA (thr={thr})")
     plot_bias_hist(Yv, y_all_hat)
 
-    # C) PER‐CATEGORY + Elev×Veg
+    # ─── NEW GLOBAL MEAN-BIAS MAP ────────────────────────────────────
     pix_full  = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
-    pix_valid = pix_full[ok]
-    elev_all  = ds["Elevation"].values.ravel(order="C")[ok]
-    veg_all   = ds["VegTyp"   ].values.ravel(order="C")[ok].astype(int)
-    for c in range(4):
-        m = (cat==c)
-        if not m.any(): continue
+    pix_valid = pix_full[ok]                      # pixel id per row
+    n_pix     = ds.sizes["pixel"]                 # total number of pixels
 
+    obs_mean_all  = mean_per_pixel(pix_valid, Yv,        n_pix)
+    pred_mean_all = mean_per_pixel(pix_valid, y_all_hat, n_pix)
+
+    pix_plot = np.where(~np.isnan(obs_mean_all))[0]      # pixels with data
+    bias_map_ca(
+        ds,
+        pix_plot,
+        obs_mean_all [pix_plot],   # y_true  (mean observed DSD)
+        pred_mean_all[pix_plot]    # y_pred  (mean predicted DSD)
+    )
+
+
+    # ------------------------------------------------------------------
+    # C) PER-CATEGORY + Elev×Veg
+    # ------------------------------------------------------------------
+    elev_all = ds["Elevation"].values.ravel(order="C")[ok]
+    veg_all  = ds["VegTyp"   ].values.ravel(order="C")[ok].astype(int)
+
+    for c in range(4):
+        m = (cat == c)
+        if not m.any():
+            continue
+
+        # ---- existing scatter / density / hist -----------------------
         plot_scatter(Yv[m],      y_all_hat[m])
         plot_density_scatter_by_cat(Yv, y_all_hat, cat, cat_idx=c)
         plot_bias_hist(Yv[m],    y_all_hat[m])
-        bias_map_ca(ds, pix_valid[m], Yv[m], y_all_hat[m])
 
-        # Elev×Veg plots
+        # ─── NEW PER-CATEGORY MEAN-BIAS MAP ───────────────────────────
+        obs_mean_c  = mean_per_pixel(pix_valid[m], Yv[m],        n_pix)
+        pred_mean_c = mean_per_pixel(pix_valid[m], y_all_hat[m], n_pix)
+        pix_c = np.where(~np.isnan(obs_mean_c))[0]
+
+        bias_map_ca(
+            ds,
+            pix_c,
+            obs_mean_c [pix_c],   # mean observed for this category
+            pred_mean_c[pix_c]    # mean predicted for this category
+        )
+
+        # ---- existing Elev×Veg diagnostics --------------------------
         boxplot_dod_by_elev_veg(Yv[m], elev_all[m], veg_all[m])
-        heat_bias_by_elev_veg   (Yv[m], y_all_hat[m], elev_all[m], veg_all[m])
+        heat_bias_by_elev_veg  (Yv[m], y_all_hat[m], elev_all[m], veg_all[m])
 
 if __name__ == "__main__":
     # load
-    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset4.nc")
+    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset5.nc")
     bc = ds["burn_cumsum"].values
     cat2d = np.zeros_like(bc, int)
     cat2d[bc<0.25]            = 0
