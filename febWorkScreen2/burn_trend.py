@@ -69,7 +69,7 @@ burn_area_ac = burn_area_m2 / 4046.8564224            # m² → acres
 # 4 · Year vector for display
 # ----------------------------------------------------------------------------
 raw_years = ds["year"].values                         # 0,1,…
-years     = raw_years + 2004                         # calendar years
+years     = raw_years + 2003                         # calendar years
 series    = pd.Series(burn_area_ac, index=years, name="burn_acres")
 
 # ----------------------------------------------------------------------------
