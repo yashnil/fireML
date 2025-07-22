@@ -1,89 +1,81 @@
-
 import numpy as np
 import xarray as xr
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score
 
-# Path to your dataset
+# --------------------------------------------------
+# 1.  Load data & build category mask
+# --------------------------------------------------
 DATA_PATH = "/Users/yashnilmohanty/Desktop/final_dataset5.nc"
-
-# Load dataset
 ds = xr.open_dataset(DATA_PATH)
 
-# Build cumulative-burn categories (year, pixel)
-bc = ds["burn_cumsum"].values
+bc = ds["burn_cumsum"].values          # (year, pixel)
 cat_2d = np.zeros_like(bc, dtype=int)
-cat_2d[bc < 0.25] = 0
-cat_2d[(bc >= 0.25) & (bc < 0.50)] = 1
-cat_2d[(bc >= 0.50) & (bc < 0.75)] = 2
-cat_2d[bc >= 0.75] = 3
+cat_2d[bc < 0.25]                    = 0
+cat_2d[(bc >= 0.25) & (bc < 0.50)]   = 1
+cat_2d[(bc >= 0.50) & (bc < 0.75)]   = 2
+cat_2d[bc >= 0.75]                   = 3
 
-# Function to gather features excluding burn_fraction
-
+# --------------------------------------------------
+# 2.  Feature matrix (burn_fraction excluded)
+# --------------------------------------------------
 def gather_features_nobf(ds, target="DOD"):
-    excl = {target.lower(), 'lat', 'lon', 'latitude', 'longitude',
-            'pixel', 'year', 'burn_fraction', 'burn_cumsum'}
+    excl = {target.lower(), 'lat','lon','latitude','longitude',
+        'pixel','year','ncoords_vector','nyears_vector',
+        'burn_fraction','burn_cumsum',
+        'aorcSummerHumidity','aorcSummerPrecipitation',
+        'aorcSummerLongwave','aorcSummerShortwave',
+        'aorcSummerTemperature'}
     feats = {}
     ny = ds.sizes["year"]
     for v in ds.data_vars:
         if v.lower() in excl:
             continue
         da = ds[v]
-        if v == "aorcWinterPrecipitation":
-            da = da * 86400.0
+        if v == "aorcWinterPrecipitation":     # mm s⁻¹ → mm day⁻¹
+            da = da * 86_400.0
         if set(da.dims) == {"year", "pixel"}:
             feats[v] = da.values
         elif set(da.dims) == {"pixel"}:
             feats[v] = np.tile(da.values, (ny, 1))
     return feats
 
-# Flatten features and target
 fd = gather_features_nobf(ds, "DOD")
 feat_names = sorted(fd)
+
 X = np.column_stack([fd[n].ravel(order="C") for n in feat_names])
 y = ds["DOD"].values.ravel(order="C")
-ok = (~np.isnan(X).any(axis=1)) & np.isfinite(y)
-Xv, Yv = X[ok], y[ok]
 
-# Flatten categories
+ok  = (~np.isnan(X).any(axis=1)) & np.isfinite(y)
+Xv, Yv           = X[ok], y[ok]
 cat = cat_2d.ravel(order="C")[ok]
 
-# ── 1) globally shuffle all VALID samples, once and for all ──────
-rng  = np.random.RandomState(42)
-perm = rng.permutation(Xv.shape[0])
-Xv, Yv, cat = Xv[perm], Yv[perm], cat[perm]
-
-# Loop over each burn category for robustness test
+# --------------------------------------------------
+# 3.  Category‑wise 70 / 30 split (no global shuffle)
+# --------------------------------------------------
 for c in range(4):
-    idx = np.where(cat == c)[0]
+    idx = np.where(cat == c)[0]          # deterministic ordering
     if idx.size == 0:
-        print(f"Category {c}: no samples available")
-        continue
+        print(f"Category {c}: no samples available");  continue
 
-    # Extract data for this category
-    X_c = Xv[idx]
-    y_c = Yv[idx]
-
-    # ── exactly the same 70/30 split that gave you the original c0 results ──
     tr_idx, te_idx = train_test_split(
-       idx, test_size=0.30, random_state=42
+        idx, test_size=0.30, random_state=42, shuffle=True
     )
-    X_tr, X_te = Xv[tr_idx], Xv[te_idx]
-    y_tr, y_te = Yv[tr_idx], Yv[te_idx]
 
-    # Train model
-    # optionally turn off its bootstrap for zero extra randomness
-    rf = RandomForestRegressor(n_estimators=100,
-                               random_state=42)
+    X_tr, y_tr = Xv[tr_idx], Yv[tr_idx]
+    X_te, y_te = Xv[te_idx], Yv[te_idx]
+
+    rf = RandomForestRegressor(
+        n_estimators=100,
+        bootstrap=True,          # matches original script
+        random_state=42
+    )
     rf.fit(X_tr, y_tr)
 
-    # Predict and compute metrics
-    y_pred = rf.predict(X_te)
-    residuals = y_pred - y_te
-    mean_bias = residuals.mean()
-    std_bias = residuals.std()
-    r2 = r2_score(y_te, y_pred)
-
-    # Print results
-    print(f"Category {c}: mean bias={mean_bias:.2f}, bias std={std_bias:.2f}, R^2={r2:.2f}")
+    y_pred     = rf.predict(X_te)
+    residuals  = y_pred - y_te
+    print(f"Category {c}: "
+          f"mean bias={residuals.mean():.2f}, "
+          f"bias std={residuals.std():.2f}, "
+          f"R^2={r2_score(y_te, y_pred):.2f}")
