@@ -6,7 +6,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score
 
 # Path to your dataset
-DATA_PATH = "/Users/yashnilmohanty/Desktop/final_dataset5.nc"
+DATA_PATH = "/Users/yashnilmohanty/Desktop/final_dataset6.nc"
 
 # Load dataset
 ds = xr.open_dataset(DATA_PATH)
