@@ -6,7 +6,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score
 
 # Path to your dataset
-DATA_PATH = "/Users/yashnilmohanty/Desktop/final_dataset6.nc"
+DATA_PATH = "/Users/yashnilmohanty/Desktop/final_dataset5.nc"
 
 # Load dataset
 ds = xr.open_dataset(DATA_PATH)
@@ -49,6 +49,11 @@ Xv, Yv = X[ok], y[ok]
 # Flatten categories
 cat = cat_2d.ravel(order="C")[ok]
 
+# ── 1) globally shuffle all VALID samples, once and for all ──────
+rng  = np.random.RandomState(42)
+perm = rng.permutation(Xv.shape[0])
+Xv, Yv, cat = Xv[perm], Yv[perm], cat[perm]
+
 # Loop over each burn category for robustness test
 for c in range(4):
     idx = np.where(cat == c)[0]
@@ -60,13 +65,17 @@ for c in range(4):
     X_c = Xv[idx]
     y_c = Yv[idx]
 
-    # Split 70/30
-    X_tr, X_te, y_tr, y_te = train_test_split(
-        X_c, y_c, test_size=0.30, random_state=42
+    # ── exactly the same 70/30 split that gave you the original c0 results ──
+    tr_idx, te_idx = train_test_split(
+       idx, test_size=0.30, random_state=42
     )
+    X_tr, X_te = Xv[tr_idx], Xv[te_idx]
+    y_tr, y_te = Yv[tr_idx], Yv[te_idx]
 
     # Train model
-    rf = RandomForestRegressor(n_estimators=100, random_state=42)
+    # optionally turn off its bootstrap for zero extra randomness
+    rf = RandomForestRegressor(n_estimators=100,
+                               random_state=42)
     rf.fit(X_tr, y_tr)
 
     # Predict and compute metrics
