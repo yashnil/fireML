@@ -421,6 +421,52 @@ def mlp_unburned_experiment(X, y, cat2d, ok, ds, feat_names, unburned_max_cat=0)
 
 
     # ------------------------------------------------------------------
+    # 30 % cat 0 TEST‑SET diagnostic plots  (same styling as 100 % plots)
+    # ------------------------------------------------------------------
+    #
+    # test_idx refers to rows of Xv/Yv;  keep only those that belong to c0
+    mask_c0_test = (cat[test_idx] == 0)
+    if mask_c0_test.any():
+        idx_c0_test = test_idx[mask_c0_test]      # row indices (→ Xv/Yv)
+        y_c0_true   = Yv[idx_c0_test]
+        y_c0_pred   = y_all_hat[idx_c0_test]
+
+        # 1️⃣  plain scatter – NO title
+        plot_scatter(y_c0_true, y_c0_pred, title=None)
+
+        # 1️⃣‑bis  density‑coloured scatter (heat map)
+        # helper expects a 'cat' array → give it an all‑zero dummy
+        plot_density_scatter_by_cat(
+            y_c0_true, y_c0_pred,
+            cat=np.zeros_like(y_c0_true, dtype=int),
+            cat_idx=0
+        )
+
+        # 2️⃣  bias histogram – metrics‑only title
+        mean = (y_c0_pred - y_c0_true).mean()
+        std  = (y_c0_pred - y_c0_true).std()
+        r2   = r2_score(y_c0_true, y_c0_pred)
+        plot_bias_hist(
+            y_c0_true, y_c0_pred,
+            title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}"
+        )
+
+        # 3️⃣  pixel‑level mean‑bias map
+        obs_c0  = mean_per_pixel(pix_valid[idx_c0_test], y_c0_true, n_pix)
+        pred_c0 = mean_per_pixel(pix_valid[idx_c0_test], y_c0_pred, n_pix)
+        pix_c0  = np.where(~np.isnan(obs_c0))[0]
+        if pix_c0.size:
+            bias_map_ca(ds, pix_c0,
+                        obs_c0 [pix_c0],
+                        pred_c0[pix_c0])
+
+        # 4️⃣  Elev×Veg diagnostics (box‑plot & heat‑map)
+        elev_c0 = ds["Elevation"].values.ravel(order="C")[ok][idx_c0_test]
+        veg_c0  = ds["VegTyp"   ].values.ravel(order="C")[ok][idx_c0_test]
+        boxplot_dod_by_elev_veg(y_c0_true, elev_c0, veg_c0)
+        heat_bias_by_elev_veg  (y_c0_true, y_c0_pred, elev_c0, veg_c0)
+
+    # ------------------------------------------------------------------
     # C) PER-CATEGORY + Elev×Veg
     # ------------------------------------------------------------------
     elev_all = ds["Elevation"].values.ravel(order="C")[ok]

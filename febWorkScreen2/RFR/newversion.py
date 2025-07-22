@@ -879,6 +879,63 @@ def rf_unburned_experiment(
     # ── B. evaluate on all valid samples ──────────────────────
     y_hat_all = rf.predict(Xv)
 
+    # ----------------------------------------------------------
+    # 30 % cat 0 test‑set diagnostics (exact style match)
+    # ----------------------------------------------------------
+    #
+    # prerequisites we’ll need:
+    pix_full  = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
+    pix_valid = pix_full[ok]                 # row‑aligned with Xv / Yv
+    n_pix     = ds.sizes["pixel"]
+
+    mask_c0_test = np.zeros_like(cat, dtype=bool)
+    mask_c0_test[test_idx] = True            # test_idx are Xv/Yv row indices
+
+    if mask_c0_test.any():                   # should always be true
+        # 1️⃣  scatter (NO title)
+        plot_scatter(Yv[mask_c0_test],
+                     y_hat_all[mask_c0_test],
+                     title=None)
+        
+        # 1️⃣‑bis  density‑coloured scatter (new)
+        y_sub   = Yv[mask_c0_test]
+        yhat_sub= y_hat_all[mask_c0_test]
+        cat_sub = np.zeros_like(y_sub, dtype=int)   # everything belongs to cat 0
+        plot_density_scatter_by_cat(y_sub, yhat_sub, cat_sub, cat_idx=0)
+
+        # 2️⃣  bias histogram (metrics‑only title)
+        mean = (y_hat_all[mask_c0_test] - Yv[mask_c0_test]).mean()
+        std  = (y_hat_all[mask_c0_test] - Yv[mask_c0_test]).std()
+        r2   = r2_score(Yv[mask_c0_test], y_hat_all[mask_c0_test])
+        plot_bias_hist(Yv[mask_c0_test], y_hat_all[mask_c0_test],
+                       title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}")
+
+        # 3️⃣  pixel‑level bias map (NO title)
+        obs_c0 = mean_per_pixel(pix_valid[mask_c0_test],
+                                Yv       [mask_c0_test], n_pix)
+        pred_c0 = mean_per_pixel(pix_valid[mask_c0_test],
+                                 y_hat_all[mask_c0_test], n_pix)
+        pix_c0 = np.where(~np.isnan(obs_c0))[0]
+        if pix_c0.size:
+            bias_map_ca(ds, pix_c0,
+                        obs_c0 [pix_c0],
+                        pred_c0[pix_c0],
+                        title=None)
+
+        # 4️⃣  elev × veg heat‑map grid (NO title) + box‑plot
+        elev_c0 = ds["Elevation"].values.ravel(order="C")[ok][mask_c0_test]
+        veg_c0  = ds["VegTyp"   ].values.ravel(order="C")[ok][mask_c0_test]
+        boxplot_dod_by_elev_veg(Yv[mask_c0_test], elev_c0, veg_c0, tag=None)
+        heat_bias_by_elev_veg  (Yv[mask_c0_test], y_hat_all[mask_c0_test],
+                                elev_c0, veg_c0, tag=None)
+
+        # 5️⃣  snowfall‑tercile bias histograms (metrics title only)
+        for s in (0, 1, 2):
+            sel = mask_c0_test & (snow_cat == s)
+            bias_hist_single(Yv, y_hat_all,
+                             sel       = sel,
+                             burn_idx  = 0,
+                             snow_idx  = s)
 
     # --- NEW global box-plots & histograms ---------------------------------
     boxplot_dod_by_cat(Yv, y_hat_all, cat,
