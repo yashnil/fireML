@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 from scipy.stats import ranksums
 from scipy.stats import spearmanr
+from scipy.stats import gaussian_kde
 import xarray as xr
 
 # ─── scikit-learn ────────────────────────────────────────────
@@ -32,7 +33,7 @@ from pathlib import Path
 # typing
 from typing import Dict, List, Tuple, Optional
 
-PIX_SZ = 1
+PIX_SZ = 0.5
 STATES_SHP = "data/cb_2022_us_state_500k/cb_2022_us_state_500k.shp"
 STATES = gpd.read_file(STATES_SHP).to_crs(epsg=3857)
 # ─── California lon/lat rectangle  (PlateCarree) ─────────────
@@ -70,6 +71,12 @@ NICE_NAME["VegTyp"] = "Vegetation Type"
 NICE_NAME["sweWinter"] = "Winter SWE"
 NICE_NAME["burn_fraction"] = "Burn Fraction"
 
+# ── hard-coded units for the Top-5 features ───────────────────────────
+NICE_NAME["peakValue"]               = "Peak SWE (mm)"
+NICE_NAME["aorcSpringTemperature"]   = "Spring Temperature (K)"
+NICE_NAME["aorcWinterPrecipitation"] = "Winter Precipitation (mm/day)"
+NICE_NAME["aorcSpringShortwave"]     = "Spring Shortwave↓ (W/m⁻²)"
+
 # ────────────────────────────────────────────────────────────
 #  pretty timer
 # ────────────────────────────────────────────────────────────
@@ -105,6 +112,48 @@ def plot_scatter(y_true, y_pred, title=None):
     plt.tight_layout()
     plt.show()
 
+def plot_density_scatter_by_cat(y_true, y_pred, cat, cat_idx,
+                                point_size: int = 4,
+                                cmap: str = 'inferno'):
+    """
+    Density-coloured scatter plot (Gaussian KDE) for a single category.
+
+    • identical axes limits & aspect ratio as the plain scatter
+    • no colour-bar
+    """
+    m = (cat == cat_idx)
+    x = y_pred[m]
+    y = y_true[m]
+
+    if x.size == 0:        # nothing to show
+        return
+
+    # KDE density
+    xy = np.vstack([x, y])
+    z = gaussian_kde(xy)(xy)
+
+    # plot least-dense first
+    idx = z.argsort()
+    x, y, z = x[idx], y[idx], z[idx]
+
+    # axis limits (match plain scatter style)
+    mn, mx = float(min(x.min(), y.min())), float(max(x.max(), y.max()))
+    pad = (mx - mn) * 0.05
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(x, y, c=z, s=point_size, cmap=cmap)
+
+    ax.plot([mn, mx], [mn, mx], 'k--', lw=1)
+    ax.set_xlim(mn - pad, mx + pad)
+    ax.set_ylim(mn - pad, mx + pad)
+    ax.set_aspect('equal', 'box')
+
+    ax.set_xlabel("Predicted DSD", fontsize=FONT_LABEL)
+    ax.set_ylabel("Observed DSD",  fontsize=FONT_LABEL)
+    ax.tick_params(labelsize=FONT_TICK)
+    plt.tight_layout()
+    plt.show()
+
 
 def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
     """
@@ -136,65 +185,123 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
     plt.show()
 
 
-def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx, bins=80):
+def plot_bias_hist(y_true, y_pred, title=None, rng=(-100, 300),
+                   tick_limit: int = 100):
     """
-    Point‐density scatter via a 2D histogram (counts→color),
-    using the same tight square axes and ticks as the others.
+    Histogram of prediction bias with customised x-tick labelling.
+
+    • x-axis label: “Bias (Days)”
+    • tick labels are shown only for values within ±tick_limit
+      (spacing stays the same; labels beyond are blanked)
     """
-    mask = (cat == cat_idx)
-    x = y_pred[mask]
-    y = y_true[mask]
-
-    # compute the limits & padding
-    mn, mx = float(min(x.min(), y.min())), float(max(x.max(), y.max()))
-    pad = (mx - mn) * 0.05
-
-    # 2D bin counts
-    counts, xedges, yedges = np.histogram2d(x, y, bins=bins)
-    xi = np.minimum(np.digitize(x, xedges) - 1, bins-1)
-    yi = np.minimum(np.digitize(y, yedges) - 1, bins-1)
-    dens = counts[xi, yi]
-
-    fig, ax = plt.subplots(figsize=(6,6))
-    sc = ax.scatter(x, y, c=dens, cmap='inferno', s=PIX_SZ*10, edgecolors='none')
-
-    # 1:1 line + matched limits
-    ax.plot([mn, mx], [mn, mx], 'k--', linewidth=1)
-    ax.set_xlim(mn - pad, mx + pad)
-    ax.set_ylim(mn - pad, mx + pad)
-
-    # enforce identical ticks
-    ticks = ax.get_yticks()
-    ax.set_xticks(ticks)
-    ax.set_xlabel("Predicted DSD", fontsize=FONT_LABEL)
-    ax.set_ylabel("Observed DSD", fontsize=FONT_LABEL)
-    ax.tick_params(axis='both', labelsize=FONT_TICK)
-    # ax.set_title(f"Category {cat_idx} Density", fontsize=FONT_LABEL)
-
-    cb = fig.colorbar(sc, ax=ax, shrink=0.8, label="Local Count")
-    cb.ax.tick_params(labelsize=FONT_TICK)
-    cb.set_label("Local Count", fontsize=FONT_LABEL)
-
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_bias_hist(y_true, y_pred, title=None, rng=(-100,300)):
-    fig, ax = plt.subplots(figsize=(6,4))
+    fig, ax = plt.subplots(figsize=(6, 4))
     res = y_pred - y_true
     ax.hist(res, bins=50, range=rng, alpha=0.7)
     ax.axvline(res.mean(), color='k', ls='--', lw=2)
     ax.text(0.02, 0.95, f"N={len(y_true)}",
-            transform=ax.transAxes, fontsize=FONT_LEGEND, va='top')
+            transform=ax.transAxes,
+            fontsize=FONT_LEGEND, va='top')
+
     mean, std, r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
-    # R² now to two decimals
     ax.set_title(f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}",
                  fontsize=FONT_LABEL)
-    ax.set_xlabel("Bias (Pred − Obs, Days)", fontsize=FONT_LABEL)
-    ax.set_ylabel("Count",           fontsize=FONT_LABEL)
-    ax.tick_params(axis='both', labelsize=FONT_TICK)
+
+    # ── new x-axis label & selective tick labelling ───────────
+    ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
+    xt = ax.get_xticks()
+    ax.set_xticklabels([f'{t:g}' if abs(t) <= tick_limit else '' for t in xt])
+
+    ax.set_ylabel("Count", fontsize=FONT_LABEL)
+    ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
+
+# ─────────────────────────────────────────────────────────────
+#  Snow-event frequency proxy from seasonal means
+# ─────────────────────────────────────────────────────────────
+def snowfreq_from_means(wprec_mmday, wtemp_K,
+                        mm_per_event=5.0,  winter_days=90.0):
+    """
+    Heuristic count of snow days per winter using *seasonal* means:
+        • scale precip by mm_per_event to turn mm into “events”
+        • weight by a logistic temp-based snow fraction
+    """
+    # logistic weight: ≈1 when T≤0 °C, 0 when T≥4 °C
+    weight = snow_fraction_jordan(wtemp_K)
+    # proxy in "days" (cap at winter_days for realism)
+    proxy = np.minimum(wprec_mmday / mm_per_event * weight, winter_days)
+    return proxy.astype(np.float32)
+
+def snow_fraction_jordan(temp_K,
+                         t_snow=0.5,    # °C – all-snow below this
+                         t_rain=2.5):   # °C – all-rain above this
+    """
+    Linear rain/snow partitioning after Jordan (1991, SNTHERM.89).
+
+    Parameters
+    ----------
+    temp_K : ndarray
+        Air temperature [K].
+    t_snow, t_rain : float
+        Lower / upper temperature bounds for fractional snow (°C).
+
+    Returns
+    -------
+    fsnow : ndarray
+        Fraction (0‒1) of precipitation that falls as snow.
+        1  below t_snow, 0 above t_rain, linear transition in between.
+    """
+    t_C = temp_K - 273.15
+    # (T_rain − T) / (T_rain − T_snow), then clip to 0‒1 just in case
+    fsnow = np.clip((t_rain - t_C) / (t_rain - t_snow), 0.0, 1.0)
+    return fsnow.astype(np.float32)
+
+
+# ─────────────────────────────────────────────────────────────
+#  Bias histogram (metrics-only title + console tag)
+# ─────────────────────────────────────────────────────────────
+def bias_hist_single(y_true, y_pred,
+                     sel, burn_idx, snow_idx,
+                     rng=(-100, 100), bins=50, tick_limit=100):
+    """
+    Draw a single histogram of (y_pred – y_true) where *sel* is True.
+
+    • Title shows only Mean Bias, Bias Std, and R².
+    • A descriptive line (burn category & snow band) is printed to stdout.
+    """
+    if sel.sum() == 0:
+        print(f"[SKIP] burn c{burn_idx}, snow {snow_idx}: N=0")
+        return
+
+    res   = y_pred[sel] - y_true[sel]
+    mean  = res.mean()
+    std   = res.std()
+    r2    = r2_score(y_true[sel], y_pred[sel])
+
+    # ── console tag for later classification ────────────────
+    snow_lbl = {0: "Low", 1: "Moderate", 2: "High"}
+    print(f"[PLOT] burn c{burn_idx}, {snow_lbl[snow_idx]} snowfall  "
+          f"→ N={sel.sum():5d},  μ={mean:7.2f},  σ={std:6.2f},  R²={r2:5.3f}")
+
+    # ── the plot itself ─────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.hist(res, bins=bins, range=rng, alpha=0.7)
+    ax.axvline(mean, color='k', ls='--', lw=2)
+
+    ax.set_title(f"Mean Bias={mean:.2f},  Bias Std={std:.2f},  R²={r2:.2f}",
+                 fontsize=FONT_LABEL)
+    ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
+    ax.set_ylabel("Count",       fontsize=FONT_LABEL)
+
+    # trimmed x-tick labels like your original helper
+    xt = ax.get_xticks()
+    ax.set_xticklabels([f'{t:g}' if abs(t) <= tick_limit else '' for t in xt])
+
+    ax.tick_params(labelsize=FONT_TICK)
+    plt.tight_layout()
+    plt.show()
+
+
 
 def plot_top10_features(rf, names):
     imp = rf.feature_importances_
@@ -206,7 +313,7 @@ def plot_top10_features(rf, names):
         [NICE_NAME.get(names[i], names[i]) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
-    ax.set_ylabel("Feature Importance", fontsize=FONT_LABEL)
+    ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
     ax.tick_params(axis='y', labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
@@ -224,7 +331,7 @@ def plot_permutation_importance(rf, X_val, y_val, names):
         [NICE_NAME.get(names[i], names[i]) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
-    ax.set_ylabel("Permutation Importance", fontsize=FONT_LABEL)
+    ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
     ax.tick_params(axis='y', labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
@@ -338,7 +445,7 @@ def plot_top5_feature_scatter_binned(
             ax.plot(xv, ymu, '-', color=col, alpha=0.7)
         ax.set_xlabel(pretty, fontsize=FONT_LABEL)
         ax.set_ylabel("Observed DSD (Days)", fontsize=FONT_LABEL)
-        ax.set_title(f"Feature {rank}", fontsize=FONT_LABEL+2)
+        ax.set_title(f"Predictor {rank}", fontsize=FONT_LABEL+2)
         ax.tick_params(axis='both', labelsize=FONT_TICK)
         ax.legend(fontsize=FONT_LEGEND, loc="best")
         plt.tight_layout()
@@ -500,26 +607,56 @@ def dod_map_ca(ds, pix_idx, values, title=None,
     ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
                   crs=ccrs.PlateCarree())
     sc = ax.scatter(x, y, c=values, cmap=cmap, vmin=vmin, vmax=vmax,
-                    s=1, marker="s", transform=merc, zorder=3)
+                    s=PIX_SZ, marker="s", transform=merc, zorder=3)
     cb = plt.colorbar(sc, ax=ax, shrink=0.8, label="DSD (Days)")
     cb.ax.tick_params(labelsize=FONT_TICK)
     cb.set_label("DSD (Days)", fontsize=FONT_LABEL)
     plt.tight_layout()
     plt.show()
 
+# ── helper: aggregate a 1-D sample vector to a per-pixel mean ────────────
+def mean_per_pixel(pix_idx: np.ndarray,
+                   values:   np.ndarray,
+                   n_pix:    int) -> np.ndarray:
+    """
+    Parameters
+    ----------
+    pix_idx : 1-D array of pixel IDs, one per sample row
+    values  : 1-D array of the same length with the variable to average
+    n_pix   : total number of pixels in the dataset (ds.sizes['pixel'])
+
+    Returns
+    -------
+    mean_val : np.ndarray  (length = n_pix)
+        NaN for pixels that have no valid samples.
+    """
+    mean_val = np.full(n_pix, np.nan, dtype=np.float32)
+    count    = np.zeros(n_pix,  dtype=np.uint32)
+
+    for pid, val in zip(pix_idx, values):
+        if np.isfinite(val):
+            if np.isnan(mean_val[pid]):
+                mean_val[pid] = 0.0
+            mean_val[pid] += val
+            count[pid]    += 1
+
+    mask = count > 0
+    mean_val[mask] /= count[mask]
+    return mean_val
+
 def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None):
     merc = ccrs.epsg(3857)
     lat = ds["latitude"].values.ravel()
     lon = ds["longitude"].values.ravel()
     x,y = merc.transform_points(ccrs.Geodetic(), lon[pix_idx], lat[pix_idx])[:,:2].T
-    bias = np.clip(y_pred - y_true, -60, 60)
+    bias = np.clip(y_pred - y_true, -40, 40)
     fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
     add_background(ax, CA_EXTENT, zoom=6)
     ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
                   crs=ccrs.PlateCarree())
     sc = ax.scatter(x, y, c=bias, cmap="seismic_r",
-                    norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
-                    s=1, marker="s", transform=merc, zorder=3)
+                    norm=TwoSlopeNorm(vmin=-40, vcenter=0, vmax=40),
+                    s=PIX_SZ, marker="s", transform=merc, zorder=3)
     cb = plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Days)")
     cb.ax.tick_params(labelsize=FONT_TICK)
     cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
@@ -549,30 +686,54 @@ def boxplot_dod_by_elev_veg(y, elev, veg, tag=None):
 def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag=None,
                           elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500)):
     bias = y_pred - y_true
-    elev_bin = np.digitize(elev, elev_edges)-1
-    vrange, nveg = GLOBAL_VEGRANGE, len(GLOBAL_VEGRANGE)
-    grid = np.full((len(elev_edges)-1, nveg), np.nan)
+    elev_bin = np.digitize(elev, elev_edges) - 1
+
+    vrange = GLOBAL_VEGRANGE
+    grid = np.full((len(elev_edges)-1, len(vrange)), np.nan)
+
     for i in range(len(elev_edges)-1):
-        for j,v in enumerate(vrange):
-            sel = (elev_bin==i)&(veg==v)
-            if sel.any(): grid[i,j] = np.nanmean(bias[sel])
-    fig, ax = plt.subplots(figsize=(8,4))
-    im = ax.imshow(grid, cmap='seismic_r', vmin=-60, vmax=60,
+        for j, v in enumerate(vrange):
+            sel = (elev_bin == i) & (veg == v)
+            if sel.any():
+                grid[i, j] = np.nanmean(bias[sel])
+
+    # ── NEW: round to nearest integer for display & ensure −0 → 0
+    grid_display = np.round(grid)
+    grid_display[np.isclose(grid_display, 0)] = 0
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    im = ax.imshow(np.clip(grid, -15, 15),          # colour limits ±15
+                   cmap='seismic_r',
+                   vmin=-15, vmax=15,
                    origin='lower', aspect='auto')
+
+    # cell borders + integer labels
     for i in range(grid.shape[0]):
         for j in range(grid.shape[1]):
-            ax.add_patch(plt.Rectangle((j-0.5,i-0.5),1,1,
-                                       ec='black',fc='none',lw=0.6))
-            if not np.isnan(grid[i,j]):
-                ax.text(j,i,f"{grid[i,j]:.0f}",
-                        ha='center',va='center',fontsize=FONT_LABEL)
-    ax.set_xticks(range(nveg))
+
+            ax.add_patch(plt.Rectangle((j-0.5, i-0.5), 1, 1,
+                                       ec='black', fc='none', lw=0.6))
+            
+            val = grid_display[i, j]
+            if np.isnan(val):
+                continue
+
+            # ── new threshold: white if |val| ≥ 8 ───────────────
+            txt_color = 'white' if abs(val) >= 8 else 'black'
+
+            ax.text(j, i, f"{int(val):d}",
+                    ha='center', va='center',
+                    fontsize=FONT_LABEL,
+                    color=txt_color)
+
+    ax.set_xticks(range(len(vrange)))
     ax.set_xticklabels([VEG_NAMES[v] for v in vrange],
                        rotation=45, ha='right', fontsize=FONT_TICK)
     ax.set_yticks(range(len(elev_edges)-1))
-    ax.set_yticklabels([f"{elev_edges[i]}–{elev_edges[i+1]} m"
-                        for i in range(len(elev_edges)-1)],
+    ax.set_yticklabels([f"{elev_edges[k]}–{elev_edges[k+1]} m"
+                        for k in range(len(elev_edges)-1)],
                        fontsize=FONT_TICK)
+
     cb = plt.colorbar(im, ax=ax, label="Bias (Days)")
     cb.ax.tick_params(labelsize=FONT_TICK)
     cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
@@ -596,6 +757,11 @@ def gather_features_nobf(ds, target="DOD"):
         if v.lower() in excl:
             continue
         da = ds[v]
+
+        # ---- NEW: unit conversion (mm s⁻¹ → mm day⁻¹) ------------
+        if v == "aorcWinterPrecipitation":
+            da = da * 86_400.0          # 60 s * 60 min * 24 h
+
         if set(da.dims) == {"year", "pixel"}:
             feats[v] = da.values
         elif set(da.dims) == {"pixel"}:
@@ -713,6 +879,63 @@ def rf_unburned_experiment(
     # ── B. evaluate on all valid samples ──────────────────────
     y_hat_all = rf.predict(Xv)
 
+    # ----------------------------------------------------------
+    # 30 % cat 0 test‑set diagnostics (exact style match)
+    # ----------------------------------------------------------
+    #
+    # prerequisites we’ll need:
+    pix_full  = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
+    pix_valid = pix_full[ok]                 # row‑aligned with Xv / Yv
+    n_pix     = ds.sizes["pixel"]
+
+    mask_c0_test = np.zeros_like(cat, dtype=bool)
+    mask_c0_test[test_idx] = True            # test_idx are Xv/Yv row indices
+
+    if mask_c0_test.any():                   # should always be true
+        # 1️⃣  scatter (NO title)
+        plot_scatter(Yv[mask_c0_test],
+                     y_hat_all[mask_c0_test],
+                     title=None)
+        
+        # 1️⃣‑bis  density‑coloured scatter (new)
+        y_sub   = Yv[mask_c0_test]
+        yhat_sub= y_hat_all[mask_c0_test]
+        cat_sub = np.zeros_like(y_sub, dtype=int)   # everything belongs to cat 0
+        plot_density_scatter_by_cat(y_sub, yhat_sub, cat_sub, cat_idx=0)
+
+        # 2️⃣  bias histogram (metrics‑only title)
+        mean = (y_hat_all[mask_c0_test] - Yv[mask_c0_test]).mean()
+        std  = (y_hat_all[mask_c0_test] - Yv[mask_c0_test]).std()
+        r2   = r2_score(Yv[mask_c0_test], y_hat_all[mask_c0_test])
+        plot_bias_hist(Yv[mask_c0_test], y_hat_all[mask_c0_test],
+                       title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}")
+
+        # 3️⃣  pixel‑level bias map (NO title)
+        obs_c0 = mean_per_pixel(pix_valid[mask_c0_test],
+                                Yv       [mask_c0_test], n_pix)
+        pred_c0 = mean_per_pixel(pix_valid[mask_c0_test],
+                                 y_hat_all[mask_c0_test], n_pix)
+        pix_c0 = np.where(~np.isnan(obs_c0))[0]
+        if pix_c0.size:
+            bias_map_ca(ds, pix_c0,
+                        obs_c0 [pix_c0],
+                        pred_c0[pix_c0],
+                        title=None)
+
+        # 4️⃣  elev × veg heat‑map grid (NO title) + box‑plot
+        elev_c0 = ds["Elevation"].values.ravel(order="C")[ok][mask_c0_test]
+        veg_c0  = ds["VegTyp"   ].values.ravel(order="C")[ok][mask_c0_test]
+        boxplot_dod_by_elev_veg(Yv[mask_c0_test], elev_c0, veg_c0, tag=None)
+        heat_bias_by_elev_veg  (Yv[mask_c0_test], y_hat_all[mask_c0_test],
+                                elev_c0, veg_c0, tag=None)
+
+        # 5️⃣  snowfall‑tercile bias histograms (metrics title only)
+        for s in (0, 1, 2):
+            sel = mask_c0_test & (snow_cat == s)
+            bias_hist_single(Yv, y_hat_all,
+                             sel       = sel,
+                             burn_idx  = 0,
+                             snow_idx  = s)
 
     # --- NEW global box-plots & histograms ---------------------------------
     boxplot_dod_by_cat(Yv, y_hat_all, cat,
@@ -734,13 +957,17 @@ def rf_unburned_experiment(
 
     # pixel‑level bias map
     pix_full = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
-    bias_map_ca(
-        ds,
-        pix_full[ok],
-        Yv,
-        y_hat_all,
-        f"Pixel Bias: ALL data (thr={thr})",
-    )
+    # ---- NEW ----
+    n_pix     = ds.sizes["pixel"]
+    obs_mean  = mean_per_pixel(pix_full[ok], Yv,        n_pix)
+    pred_mean = mean_per_pixel(pix_full[ok], y_hat_all, n_pix)
+
+    pix_plot  = np.where(~np.isnan(obs_mean))[0]        # pixels that have data
+    bias_map_ca(ds,
+                pix_plot,
+                obs_mean [pix_plot],   # y_true  (mean observed DSD)
+                pred_mean[pix_plot],   # y_pred  (mean predicted DSD)
+                f"Pixel Bias: ALL data (thr={thr})")
 
     # ── C. per‑cat scatter / hist, Wilcoxon tests, DoD maps, Bias maps ──
     bias_all = y_hat_all - Yv
@@ -755,7 +982,7 @@ def rf_unburned_experiment(
 
         # scatter / hist
         plot_scatter(Yv[m], y_hat_all[m], title=None)
-        plot_scatter_density_by_cat(Yv, y_hat_all, cat, cat_idx=c, bins=80)
+        plot_density_scatter_by_cat(Yv, y_hat_all, cat, cat_idx=c)
         r2 = r2_score(Yv[m], y_hat_all[m])
         mean, std = (y_hat_all[m]-Yv[m]).mean(), (y_hat_all[m]-Yv[m]).std()
         plot_bias_hist(
@@ -764,30 +991,32 @@ def rf_unburned_experiment(
             title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}"
         )
 
-        # observed & predicted DoD maps
-        dod_map_ca(
-            ds,
-            pix_valid[m],
-            Yv[m],
-            f"Observed DSD – cat {c} (thr={thr})",
-            cmap="Blues",
-        )
-        dod_map_ca(
-            ds,
-            pix_valid[m],
-            y_hat_all[m],
-            f"Predicted DSD – cat {c} (thr={thr})",
-            cmap="Blues",
-        )
+        # aggregate only the rows belonging to this category
+        obs_c_mean  = mean_per_pixel(pix_valid[m], Yv[m],        n_pix)
+        pred_c_mean = mean_per_pixel(pix_valid[m], y_hat_all[m], n_pix)
+        pix_c = np.where(~np.isnan(obs_c_mean))[0]
 
-        # per‑category pixel‑bias map
-        bias_map_ca(
-            ds,
-            pix_valid[m],
-            Yv[m],
-            y_hat_all[m],
-            f"Pixel Bias – cat {c} (thr={thr})",
-        )
+        # (A) mean observed DSD
+        dod_map_ca(ds,
+                pix_c,
+                obs_c_mean[pix_c],
+                f"Observed DSD – cat {c} (thr={thr})",
+                cmap="Blues")
+
+        # (B) mean predicted DSD
+        dod_map_ca(ds,
+                pix_c,
+                pred_c_mean[pix_c],
+                f"Predicted DSD – cat {c} (thr={thr})",
+                cmap="Blues")
+
+        # (C) mean pixel bias
+        bias_map_ca(ds,
+                    pix_c,
+                    obs_c_mean [pix_c],    # y_true  (mean observed)
+                    pred_c_mean[pix_c],    # y_pred  (mean predicted)
+                    f"Pixel Bias – cat {c} (thr={thr})")
+
 
         # per‑category Elev×Veg box‑plot
         elev = ds["Elevation"].values.ravel(order="C")[ok][m]
@@ -798,6 +1027,16 @@ def rf_unburned_experiment(
 
         heat_bias_by_elev_veg(Yv[m], y_hat_all[m], elev, veg,
                       f"Elev×Veg Bias – cat {c} (thr={thr})")
+        
+        # ─── NEW: 12 individual snow-stratified bias plots ───
+        for s in (0, 1, 2):
+            mask = (cat == c) & (snow_cat == s)
+            bias_hist_single(
+                Yv, y_hat_all,
+                sel       = mask,
+                burn_idx  = c,
+                snow_idx  = s
+            )
 
     if 0 in bias_by_cat:
         print("\nWilcoxon rank‑sum (bias difference vs cat 0)")
@@ -913,8 +1152,8 @@ def rf_unburned_experiment(
 #  MAIN
 # ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    log("loading final_dataset4.nc …")
-    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset4.nc")
+    log("loading final_dataset5.nc …")
+    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset5.nc")
     # ---- fixed mercator extent that encloses the CA rectangle ----
     merc   = ccrs.epsg(3857)
     x0, y0 = merc.transform_point(CA_LON_W, CA_LAT_S, ccrs.PlateCarree())
@@ -933,6 +1172,24 @@ if __name__ == "__main__":
 
     # build feature matrix (burn_fraction excluded)
     X_all, y_all, feat_names, ok = flatten_nobf(ds, "DOD")
+
+    # ─── snowfall-frequency proxy stratification ─────────────────
+    log("building snow-event-frequency proxy from seasonal means …")
+    # convert precip from mm s⁻¹ → mm day⁻¹
+    wprec_mmday = ds["aorcWinterPrecipitation"].values * 86_400.0
+    wtemp_K     = ds["aorcWinterTemperature"].values
+
+    snowfreq    = snowfreq_from_means(wprec_mmday, wtemp_K)      # (year,pixel)
+
+    # --- flatten + mask to 'ok' ---------------------------------
+    snowfreq_vals = snowfreq.ravel(order="C")[ok]
+
+    low_th , high_th = np.percentile(snowfreq_vals, [33, 67])
+    snow_cat = np.digitize(snowfreq_vals, [low_th, high_th])      # 0,1,2
+
+    print(f"[snow-proxy] 33 %={low_th:.1f} days, 67 %={high_th:.1f} days")
+
+    ds["winterSnowFreqProxy"] = (("year", "pixel"), snowfreq)
 
     log(
         f"feature matrix ready – {ok.sum()} valid samples, "

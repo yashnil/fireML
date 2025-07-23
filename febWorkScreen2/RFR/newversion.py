@@ -77,6 +77,17 @@ NICE_NAME["aorcSpringTemperature"]   = "Spring Temperature (K)"
 NICE_NAME["aorcWinterPrecipitation"] = "Winter Precipitation (mm/day)"
 NICE_NAME["aorcSpringShortwave"]     = "Spring Shortwave↓ (W/m⁻²)"
 
+# ------------------------------------------------------------------
+#  Clean labels for the two Top‑10 importance plots
+# ------------------------------------------------------------------
+UNITS_TO_STRIP = ["(mm)", "(K)", "(m)", "(mm/day)", "(W/m⁻²)"]
+
+def strip_units(label: str) -> str:
+    """Remove the listed unit substrings and tidy spaces/underscores."""
+    for u in UNITS_TO_STRIP:
+        label = label.replace(u, "")
+    return label.replace("_", " ").strip()
+
 # ────────────────────────────────────────────────────────────
 #  pretty timer
 # ────────────────────────────────────────────────────────────
@@ -310,7 +321,7 @@ def plot_top10_features(rf, names):
     ax.bar(range(10), imp[idx])
     ax.set_xticks(range(10))
     ax.set_xticklabels(
-        [NICE_NAME.get(names[i], names[i]) for i in idx],
+        [strip_units(NICE_NAME.get(names[i], names[i])) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
     ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
@@ -328,7 +339,7 @@ def plot_permutation_importance(rf, X_val, y_val, names):
     ax.bar(range(10), imp[idx])
     ax.set_xticks(range(10))
     ax.set_xticklabels(
-        [NICE_NAME.get(names[i], names[i]) for i in idx],
+        [strip_units(NICE_NAME.get(names[i], names[i])) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
     ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
@@ -973,6 +984,14 @@ def rf_unburned_experiment(
     bias_all = y_hat_all - Yv
     bias_by_cat = {c: bias_all[cat == c] for c in range(4) if (cat == c).any()}
 
+    # ---------- NEW: rank‑sum p‑values for sequential pairs ----------
+    print("\nWilcoxon rank‑sum on pixel‑level bias distributions")
+    for a, b in [(1, 0), (2, 1), (3, 2)]:
+        if a in bias_by_cat and b in bias_by_cat:
+            stat, p = ranksums(bias_by_cat[a], bias_by_cat[b])
+            print(f"  cat {a} vs cat {b} → stat={stat:.3f}, p={p:.3g}")
+    # ----------------------------------------------------------------
+
     pix_valid = pix_full[ok]  # pixel index per row of Xv/Yv
 
     for c in range(4):
@@ -1081,6 +1100,15 @@ def rf_unburned_experiment(
             metrics[c]['rmse'].append(np.sqrt(mean_squared_error(y_s, yhat)))
             metrics[c]['r2'  ].append(r2_score(y_s, yhat))
 
+    # ---------- NEW: rank‑sum on down‑sampled mean biases ----------
+    print("\nWilcoxon rank‑sum on DOWN‑SAMPLED mean bias (100 runs)")
+    for a, b in [(1, 0), (2, 1), (3, 2)]:
+        if a in metrics and b in metrics:
+            stat, p = ranksums(metrics[a]['bias'], metrics[b]['bias'])
+            print(f"  cat {a} vs cat {b} → stat={stat:.3f}, p={p:.3g}")
+    # ----------------------------------------------------------------
+
+
     # ── merged histogram figure ───────────────────────────────
     
     orig_stats = {}
@@ -1145,7 +1173,7 @@ def rf_unburned_experiment(
             stat, p = ranksums(data0, datac)
             print(f"  {fname}: cat{c} vs cat0 → statistic={stat:.3f}, p={p:.3e}")
 
-    return rf
+    return rf, bias_all, cat
 
 
 # ────────────────────────────────────────────────────────────
@@ -1201,14 +1229,43 @@ if __name__ == "__main__":
 
     # ── run #1 : unburned = cat 0 only  ───────────────────────────
     log("\n=== RUN #1 : unburned = cat 0 (cumsum < 0.25) ===")
-    rf_run1 = rf_unburned_experiment(
+    rf_run1, run1_bias, run1_cat = rf_unburned_experiment(
         X_all, y_all, cat_2d, ok, ds, feat_names, unburned_max_cat=0
     )
 
     # ── run #2 : unburned = cat 0 + 1  ───────────────────────────
     log("\n=== RUN #2 : unburned = cat 0 + 1 (cumsum < 0.50) ===")
-    rf_run2 = rf_unburned_experiment(
+    rf_run2, rf_run2_bias, run2_cat = rf_unburned_experiment(
         X_all, y_all, cat_2d, ok, ds, feat_names, unburned_max_cat=1
     )
+
+    import pandas as pd
+    from pathlib import Path
+
+    desktop = Path("/Users/yashnilmohanty/Desktop")      # adjust if needed
+    out_dir = desktop / "run1_bias_csv"
+    out_dir.mkdir(exist_ok=True)
+
+    # --- rebuild the 30 % test indices for cat 0 -------------------------
+    cat0_rows   = np.where(run1_cat == 0)[0]             # rows belonging to cat 0
+    _, c0_test  = train_test_split(
+                    cat0_rows, test_size=0.30, random_state=42)
+    c0_mask     = np.zeros_like(run1_cat, dtype=bool)
+    c0_mask[c0_test] = True
+    # --------------------------------------------------------------------
+
+    for c in (0, 1, 2, 3):
+        if c == 0:
+            sel = c0_mask           # ← use only the 30 % test set
+        else:
+            sel = run1_cat == c
+        if not sel.any():
+            continue
+        df = pd.DataFrame({"bias_days": run1_bias[sel]})
+        outfile = out_dir / f"run1_bias_c{c}.csv"
+        df.to_csv(outfile, index=False, float_format="%.6g")
+        print(f"[WRITE] {outfile}  (N={len(df)})")
+
+    print(f"[DONE]  All Run‑1 bias files saved in: {out_dir}")
 
     log("ALL DONE.")
