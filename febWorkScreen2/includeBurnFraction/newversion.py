@@ -657,6 +657,18 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
                 snow_idx  = snow_c
             )
 
+    # --- sequential Wilcoxon tests on TEST‑set bias -------------
+    bias_all_test = yhat_te - y_te
+    bias_by_cat   = {c: bias_all_test[cat_te == c]
+                     for c in (0, 1, 2, 3) if (cat_te == c).any()}
+
+    print("\n[TEST] Wilcoxon rank‑sum on pixel‑level bias distributions")
+    for a, b in [(1, 0), (2, 1), (3, 2)]:
+        if a in bias_by_cat and b in bias_by_cat:
+            s, p = ranksums(bias_by_cat[a], bias_by_cat[b])
+            print(f"  cat {a} vs cat {b} → stat={s:.3f}, p={p:.3g}")
+    # -------------------------------------------------------------
+
     # B) pixel-bias maps (no titles)
     
     # ── NEW: pixel-mean bias maps ───────────────────────────────
@@ -750,7 +762,7 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
                 s,p = ranksums(v0, vc)
                 print(f"Feat {pretty} c0 vs c{c}: stat={s:.3f}, p={p:.3g}")
 
-    return rf
+    return rf, bias_all_test, cat_te
 
 # ────────────────────────────────────────────────────────────
 # MAIN
@@ -790,9 +802,28 @@ if __name__=="__main__":
     print(f"[snow-proxy] 33 % = {low_th:.1f} days, 67 % = {high_th:.1f} days")
 
     # run experiment
-    rf_model = rf_experiment_nobf(
-    X_all, y_all,         # features / target
-    cat2d, ok, ds, feat_names,
-    snow_cat              # NEW positional argument
+    rf_model, exp3_bias, exp3_cat = rf_experiment_nobf(
+         X_all, y_all,         # features / target
+         cat2d, ok, ds, feat_names,
+         snow_cat              # NEW positional argument
     )
+
+    import pandas as pd
+    from pathlib import Path
+
+    desktop = Path("/Users/yashnilmohanty/Desktop")
+    out_dir = desktop / "run3_bias_csv"
+    out_dir.mkdir(exist_ok=True)
+
+    for c in (0, 1, 2, 3):
+        sel = exp3_cat == c
+        if not sel.any():
+            continue
+        pd.DataFrame({"bias_days": exp3_bias[sel]}) \
+          .to_csv(out_dir / f"run3_bias_c{c}.csv",
+                  index=False, float_format="%.6g")
+        print(f"[WRITE] {out_dir}/run3_bias_c{c}.csv  (N={sel.sum()})")
+
+    print(f"[DONE] All Experiment‑3 bias files saved in: {out_dir}")
+
     log("ALL DONE (Experiment 3).")

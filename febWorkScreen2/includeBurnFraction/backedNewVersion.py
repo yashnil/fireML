@@ -68,6 +68,22 @@ NICE_NAME["VegTyp"]         = "Vegetation Type"
 NICE_NAME["sweWinter"]      = "Winter SWE"
 NICE_NAME["burn_fraction"]  = "Burn Fraction"
 
+# ── keep units for the five top‑predictors ────────────────────────────────
+NICE_NAME["peakValue"]               = "Peak SWE (mm)"
+NICE_NAME["aorcSpringTemperature"]   = "Spring Temperature (K)"
+NICE_NAME["aorcWinterPrecipitation"] = "Winter Precipitation (mm/day)"
+NICE_NAME["aorcSpringShortwave"]     = "Spring Shortwave↓ (W/m⁻²)"   # arrow kept
+
+# --- PATCH 1 : helper to strip hard‑coded units ----------------------------
+UNITS_TO_STRIP = ["(mm)", "(K)", "(m)", "(mm/day)", "(W/m⁻²)"]
+
+def strip_units(label: str) -> str:
+    """Remove unit substrings and tidy spaces/underscores."""
+    for u in UNITS_TO_STRIP:
+        label = label.replace(u, "")
+    return label.replace("_", " ").strip()
+# ---------------------------------------------------------------------------
+
 # ────────────────────────────────────────────────────────────
 # 0) Timer
 T0 = time.time()
@@ -269,7 +285,7 @@ def plot_top10_features(rf, names):
     ax.bar(range(10), imp[idx])
     ax.set_xticks(range(10))
     ax.set_xticklabels(
-        [NICE_NAME.get(names[i], names[i]) for i in idx],
+        [strip_units(NICE_NAME.get(names[i], names[i])) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
     ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
@@ -285,7 +301,7 @@ def plot_permutation_importance(rf, X_val, y_val, names):
     ax.bar(range(10), imp[idx])
     ax.set_xticks(range(10))
     ax.set_xticklabels(
-        [NICE_NAME.get(names[i], names[i]) for i in idx],
+        [strip_units(NICE_NAME.get(names[i], names[i])) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
     ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
