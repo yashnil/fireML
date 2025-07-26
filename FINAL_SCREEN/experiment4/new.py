@@ -7,7 +7,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 # We utilize final_dataset6.nc for Experiment 4 (added in FPAR analysis)
 
 # ────────────────────────────────────────────────────────────
-def gather_features_nobf(ds, target="DOD"):
+def gather_features_nobf(ds, target="DSD"):
     excl = {target.lower(),'lat','lon','latitude','longitude',
             'pixel','year','ncoords_vector','nyears_vector',
             'burn_fraction','burn_cumsum',
@@ -86,5 +86,5 @@ if __name__ == "__main__":
     cat2d[(bc >= 0.50) & (bc < 0.75)] = 2
     cat2d[bc >= 0.75] = 3
 
-    X_all, y_all, _, ok = flatten_nobf(ds, "DOD")
+    X_all, y_all, _, ok = flatten_nobf(ds, "DSD")
     rf_eval_by_category(X_all, y_all, cat2d, ok)

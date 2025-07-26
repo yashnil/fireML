@@ -19,7 +19,7 @@ from typing import Dict
 # ------------------------------------------------------------------
 EXCLUDE_PY = "/Users/yashnilmohanty/Desktop/fireML/febWorkScreen2/excludeBurnFraction/newversion.py"
 INCLUDE_PY = "/Users/yashnilmohanty/Desktop/fireML/febWorkScreen2/includeBurnFraction/newversion.py"
-DS_NC      = "/Users/yashnilmohanty/Desktop/final_dataset4.nc"
+DS_NC      = "/Users/yashnilmohanty/Desktop/final_dataset5.nc"
 RSEED      = 42
 N_EST      = 100
 
@@ -56,8 +56,8 @@ cat_flat = cat_2d.ravel(order='C')
 # 3) build feature matrices
 # ------------------------------------------------------------------
 log("building feature matrices …")
-XA, y, namesA, okA = exclude_mod.flatten_nobf(ds, "DOD")    # no BF
-XB, _, namesB, okB = include_mod.flatten(ds, "DOD")         # + BF
+XA, y, namesA, okA = exclude_mod.flatten_nobf(ds, "DSD")    # no BF
+XB, _, namesB, okB = include_mod.flatten(ds, "DSD")         # + BF
 
 ok   = okA & okB                                # rows valid for both
 cat  = cat_flat[ok]

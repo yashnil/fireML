@@ -572,7 +572,7 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg,
 
 # ────────────────────────────────────────────────────────────
 # 5) Feature matrix
-def gather_features_nobf(ds, target="DOD"):
+def gather_features_nobf(ds, target="DSD"):
     excl = {target.lower(),'lat','lon','latitude','longitude',
             'pixel','year','ncoords_vector','nyears_vector',
             'burn_fraction','burn_cumsum',
@@ -589,7 +589,7 @@ def gather_features_nobf(ds, target="DOD"):
             feats[v] = np.tile(da.values, (ny,1))
     return feats
 
-def flatten_nobf(ds, target="DOD"):
+def flatten_nobf(ds, target="DSD"):
     fd = gather_features_nobf(ds,target)
     names = sorted(fd)
     X = np.column_stack([fd[n].ravel(order='C') for n in names])
@@ -795,7 +795,7 @@ if __name__=="__main__":
     log("categories computed")
 
     # flatten
-    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DOD")
+    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DSD")
     log("feature matrix ready (burn_fraction excluded)")
 
     # ─── snowfall-frequency proxy stratification ─────────────────

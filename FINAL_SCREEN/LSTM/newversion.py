@@ -320,7 +320,7 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg,
     plt.show()
 
 # ─── FEATURE‐MATRIX HELPERS ─────────────────────────────────────
-def gather_features_nobf(ds, target="DOD"):
+def gather_features_nobf(ds, target="DSD"):
     excl = {target.lower(),'lat','lon','latitude','longitude',
             'burn_fraction','burn_cumsum'}
     ny = ds.sizes["year"]; feats={}
@@ -333,7 +333,7 @@ def gather_features_nobf(ds, target="DOD"):
             feats[v]=np.tile(da.values,(ny,1))
     return feats
 
-def flatten_nobf(ds, target="DOD"):
+def flatten_nobf(ds, target="DSD"):
     fd = gather_features_nobf(ds,target)
     names = sorted(fd)
     X = np.column_stack([fd[n].ravel(order="C") for n in names])
@@ -500,7 +500,7 @@ if __name__=="__main__":
     log("categories computed")
 
     # build feature matrix
-    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DOD")
+    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DSD")
     # set global veg range
     GLOBAL_VEGRANGE = np.unique(ds["VegTyp"].values.ravel(order="C")[ok].astype(int))
 

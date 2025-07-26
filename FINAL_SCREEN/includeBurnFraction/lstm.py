@@ -14,7 +14,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 
 # ─── helpers ────────────────────────────────────────────────────────────
-def gather_features_incbf(ds, target="DOD"):
+def gather_features_incbf(ds, target="DSD"):
     """
     Keep every data variable except
       • the target itself
@@ -39,7 +39,7 @@ def gather_features_incbf(ds, target="DOD"):
     return feats
 
 
-def flatten_incbf(ds, target="DOD"):
+def flatten_incbf(ds, target="DSD"):
     feats = gather_features_incbf(ds, target)
     names = sorted(feats)
     X = np.column_stack([feats[n].ravel(order="C") for n in names])
@@ -74,7 +74,7 @@ if __name__ == "__main__":
     log("burn categories ready")
 
     # feature matrix
-    X_all, y_all, feat_names, ok = flatten_incbf(ds, "DOD")
+    X_all, y_all, feat_names, ok = flatten_incbf(ds, "DSD")
     cat_flat = cat2d.ravel(order="C")[ok]
     Xv, yv   = X_all[ok], y_all[ok]
     log(f"{Xv.shape[1]} predictors, {Xv.shape[0]} rows")

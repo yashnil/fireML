@@ -49,7 +49,7 @@ _EXCL_EXTRA = {
 }
 
 
-def _gather_features_nobf(ds: xr.Dataset, target: str = "DOD") -> dict:
+def _gather_features_nobf(ds: xr.Dataset, target: str = "DSD") -> dict:
     """Return a dict {name → ndarray(year,pixel)} with *burn_fraction* excluded."""
     excl = _EXCL_EXTRA | {target.lower()}
     feats = {}
@@ -68,7 +68,7 @@ def _gather_features_nobf(ds: xr.Dataset, target: str = "DOD") -> dict:
     return feats
 
 
-def _build_matrix(ds: xr.Dataset, target: str = "DOD"):
+def _build_matrix(ds: xr.Dataset, target: str = "DSD"):
     """Flatten features and target to 2‑D/1‑D arrays, removing NaNs."""
     fd = _gather_features_nobf(ds, target)
     names = sorted(fd)  # same column order as reference
@@ -93,7 +93,7 @@ if __name__ == "__main__":
     cat2d[bc >= 0.75] = 3
 
     # feature matrix & target vector (identical to experiment #1)
-    X, y, ok = _build_matrix(ds, "DOD")
+    X, y, ok = _build_matrix(ds, "DSD")
     cat = cat2d.ravel(order="C")[ok]
 
     # loop over categories

@@ -467,7 +467,7 @@ def plot_top5_feature_scatter_binned(
 # EXTRA DIAGNOSTIC PLOTS  (box-plots & histograms)
 # ------------------------------------------------------------------
 def boxplot_dod_by_cat(y_obs, y_pred, cat, title_prefix, fname_base=None):
-    """Two side-by-side box-plots: observed & predicted DOD per category."""
+    """Two side-by-side box-plots: observed & predicted DSD per category."""
     cats = [0, 1, 2, 3]
     data_obs = [y_obs[cat == c] for c in cats]
     data_pred = [y_pred[cat == c] for c in cats]
@@ -756,7 +756,7 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag=None,
 # ────────────────────────────────────────────────────────────
 #  helpers to build feature matrix (burn_fraction excluded)
 # ────────────────────────────────────────────────────────────
-def gather_features_nobf(ds, target="DOD"):
+def gather_features_nobf(ds, target="DSD"):
     excl = {target.lower(),'lat','lon','latitude','longitude',
             'pixel','year','ncoords_vector','nyears_vector',
             'burn_fraction','burn_cumsum','aorcsummerhumidity',
@@ -780,7 +780,7 @@ def gather_features_nobf(ds, target="DOD"):
     return feats
 
 
-def flatten_nobf(ds, target="DOD"):
+def flatten_nobf(ds, target="DSD"):
     fd = gather_features_nobf(ds, target)
     names = sorted(fd)
     X = np.column_stack([fd[n].ravel(order="C") for n in names])
@@ -1199,7 +1199,7 @@ if __name__ == "__main__":
     log("categories (c0‑c3) computed")
 
     # build feature matrix (burn_fraction excluded)
-    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DOD")
+    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DSD")
 
     # ─── snowfall-frequency proxy stratification ─────────────────
     log("building snow-event-frequency proxy from seasonal means …")

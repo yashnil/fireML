@@ -20,7 +20,7 @@ cat_2d[bc >= 0.75]                   = 3
 # --------------------------------------------------
 # 2.  Feature matrix (burn_fraction excluded)
 # --------------------------------------------------
-def gather_features_nobf(ds, target="DOD"):
+def gather_features_nobf(ds, target="DSD"):
     excl = {target.lower(), 'lat','lon','latitude','longitude',
         'pixel','year','ncoords_vector','nyears_vector',
         'burn_fraction','burn_cumsum',
@@ -41,11 +41,11 @@ def gather_features_nobf(ds, target="DOD"):
             feats[v] = np.tile(da.values, (ny, 1))
     return feats
 
-fd = gather_features_nobf(ds, "DOD")
+fd = gather_features_nobf(ds, "DSD")
 feat_names = sorted(fd)
 
 X = np.column_stack([fd[n].ravel(order="C") for n in feat_names])
-y = ds["DOD"].values.ravel(order="C")
+y = ds["DSD"].values.ravel(order="C")
 
 ok  = (~np.isnan(X).any(axis=1)) & np.isfinite(y)
 Xv, Yv           = X[ok], y[ok]

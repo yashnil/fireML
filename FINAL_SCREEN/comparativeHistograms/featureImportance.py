@@ -25,7 +25,7 @@ include_mod = load_module("include_mod", include_path)
 # ────────────────────────────────────────────────────────────
 # 2) Load dataset and prepare category matrix
 # ────────────────────────────────────────────────────────────
-ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset4.nc")
+ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset5.nc")
 bc = ds["burn_cumsum"].values
 cat_2d = np.zeros_like(bc, dtype=int)
 cat_2d[bc < 0.25] = 0
@@ -36,8 +36,8 @@ cat_2d[bc >= 0.75] = 3
 # ────────────────────────────────────────────────────────────
 # 3) Flatten and train models (only to get feature importances)
 # ────────────────────────────────────────────────────────────
-X_ex, y_ex, names_ex, ok_ex = exclude_mod.flatten_nobf(ds, "DOD")
-X_in, y_in, names_in, ok_in = include_mod.flatten(ds, "DOD")
+X_ex, y_ex, names_ex, ok_ex = exclude_mod.flatten_nobf(ds, "DSD")
+X_in, y_in, names_in, ok_in = include_mod.flatten(ds, "DSD")
 
 rf_ex = exclude_mod.rf_experiment_nobf(X_ex, y_ex, cat_2d, ok_ex, ds, names_ex)
 rf_in = include_mod.rf_experiment_nobf(X_in, y_in, cat_2d, ok_in, ds, names_in)
