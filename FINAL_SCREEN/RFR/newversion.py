@@ -751,6 +751,16 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag=None,
     plt.tight_layout()
     plt.show()
 
+def _print_metrics(y_true, y_pred, tag: str):
+    """Console-only metrics with a consistent format."""
+    from sklearn.metrics import mean_squared_error, r2_score
+    if y_true.size == 0:
+        print(f"{tag}: N=0 (no samples)")
+        return
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    bias = (y_pred - y_true).mean()
+    r2   = r2_score(y_true, y_pred)
+    print(f"{tag}: N={y_true.size:5d}  RMSE={rmse:6.2f}  Bias={bias:7.2f}  R²={r2:6.3f}")
 
 
 # ────────────────────────────────────────────────────────────
@@ -889,6 +899,26 @@ def rf_unburned_experiment(
 
     # ── B. evaluate on all valid samples ──────────────────────
     y_hat_all = rf.predict(Xv)
+
+    # ===== EXTREME-DRY (0–5th percentile snowfall proxy) METRICS =====
+    # Uses globals computed in MAIN: snow_low5_mask (row-aligned with Yv/Xv) and cat
+    try:
+        extreme = snow_low5_mask  # boolean mask aligned with Yv/Xv
+    except NameError:
+        extreme = None
+
+    print("\nExtreme-dry (0–5th percentile snowfall proxy) metrics:")
+    if extreme is None:
+        print("  [WARN] snow_low5_mask not defined; skip extreme-dry analysis.")
+    else:
+        # overall
+        _print_metrics(Yv[extreme], y_hat_all[extreme], "  OVERALL (low5)")
+
+        # per burn category c0..c3
+        for c in range(4):
+            m = extreme & (cat == c)
+            _print_metrics(Yv[m], y_hat_all[m], f"  cat {c} (low5)")
+
 
     # ----------------------------------------------------------
     # 30 % cat 0 test‑set diagnostics (exact style match)
@@ -1214,6 +1244,12 @@ if __name__ == "__main__":
 
     low_th , high_th = np.percentile(snowfreq_vals, [33, 67])
     snow_cat = np.digitize(snowfreq_vals, [low_th, high_th])      # 0,1,2
+
+    # 0–5th percentile mask for “extreme dry winters”
+    snow_low5_thr = np.percentile(snowfreq_vals, 5)
+    snow_low5_mask = snowfreq_vals <= snow_low5_thr
+    print(f"[snow-proxy] 5 % threshold = {snow_low5_thr:.2f} days; "
+        f"N_low5 = {snow_low5_mask.sum()} / {snowfreq_vals.size}")
 
     print(f"[snow-proxy] 33 %={low_th:.1f} days, 67 %={high_th:.1f} days")
 

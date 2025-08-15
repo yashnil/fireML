@@ -26,6 +26,7 @@ import cartopy.feature as cfeature
 import cartopy.io.img_tiles as cimgt
 import geopandas as gpd
 from typing import List, Dict
+import socket
 
 # ────────────────────────────────────────────────────────────
 PIX_SZ = 0.5
@@ -258,6 +259,16 @@ def bias_hist_single(y_true, y_pred,
     ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
+
+def _print_metrics(y_true, y_pred, tag: str):
+    """Console-only metrics with a consistent format."""
+    if y_true.size == 0:
+        print(f"{tag}: N=0 (no samples)")
+        return
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    bias = (y_pred - y_true).mean()
+    r2   = r2_score(y_true, y_pred)
+    print(f"{tag}: N={y_true.size:5d}  RMSE={rmse:6.2f}  Bias={bias:7.2f}  R²={r2:6.3f}")
 
 
 def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
@@ -611,7 +622,7 @@ def eval_bins(y, yp, burn):
 
 # ────────────────────────────────────────────────────────────
 # 7) Main RF experiment (70/30 per cat)
-def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
+def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat, snow_low5_mask=None):
     # flatten
     cat = cat2d.ravel(order='C')[ok]
     Xv, Yv = X[ok], y[ok]
@@ -635,6 +646,21 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
     # TEST predictions
     X_te, y_te = Xv[te_idx], Yv[te_idx]
     yhat_te = rf.predict(X_te)
+
+    # ===== EXTREME-DRY (0–5th percentile snowfall proxy) METRICS – TEST SET =====
+    if snow_low5_mask is None:
+        print("\nExtreme-dry (0–5th percentile) metrics (TEST): [skip] no mask provided.")
+    else:
+        print("\nExtreme-dry (0–5th percentile) metrics (TEST):")
+        te_ext = snow_low5_mask[te_idx]   # align mask to TEST rows
+
+        # Overall (TEST ∩ low5)
+        _print_metrics(y_te[te_ext], yhat_te[te_ext], "  OVERALL (low5, TEST)")
+
+        # Per burn category on TEST ∩ low5
+        for c in (0, 1, 2, 3):
+            m = te_ext & (cat_te == c)
+            _print_metrics(y_te[m], yhat_te[m], f"  cat {c} (low5, TEST)")
 
     # A) per-category scatter & bias-hist
     for c in (0,1,2,3):
@@ -799,13 +825,18 @@ if __name__=="__main__":
     low_th, high_th = np.percentile(snowfreq_vals, [33, 67])
     snow_cat = np.digitize(snowfreq_vals, [low_th, high_th])       # 0 low | 1 mod | 2 high
 
+    # 0–5th percentile mask for “extreme dry winters”
+    snow_low5_thr  = np.percentile(snowfreq_vals, 5)
+    snow_low5_mask = snowfreq_vals <= snow_low5_thr     # 1-D, aligned with X_all[ok]/y_all[ok]
+    print(f"[snow-proxy] 5 % = {snow_low5_thr:.2f} days; N_low5={snow_low5_mask.sum()} / {snowfreq_vals.size}")
+
     print(f"[snow-proxy] 33 % = {low_th:.1f} days, 67 % = {high_th:.1f} days")
 
     # run experiment
     rf_model, exp3_bias, exp3_cat = rf_experiment_nobf(
-         X_all, y_all,         # features / target
-         cat2d, ok, ds, feat_names,
-         snow_cat              # NEW positional argument
+        X_all, y_all, cat2d, ok, ds, feat_names,
+        snow_cat,                     # existing arg
+        snow_low5_mask=snow_low5_mask # NEW
     )
 
     import pandas as pd
