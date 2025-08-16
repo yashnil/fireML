@@ -946,6 +946,15 @@ def rf_unburned_experiment(
             m = extreme & (cat == c)
             _print_metrics(Yv[m], y_hat_all[m], f"  cat {c} (low5)")
 
+    # ----- NON-EXTREME (remaining 95%) — FULL SAMPLE (ALL data) -----
+    nonext = ~extreme
+    print("\nNon-extreme (remaining 95 %) metrics (ALL data):")
+    _print_metrics(Yv[nonext], y_hat_all[nonext], "  OVERALL (non-low5)")
+    for c in range(4):
+        m = nonext & (cat == c)
+        _print_metrics(Yv[m], y_hat_all[m], f"  cat {c} (non-low5)")
+    # ---------------------------------------------------------------
+
     # ----------------------------------------------------------
     # 30 % cat 0 test‑set diagnostics (exact style match)
     # ----------------------------------------------------------
