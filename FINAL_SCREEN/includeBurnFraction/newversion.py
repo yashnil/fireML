@@ -170,8 +170,8 @@ def plot_bias_hist(y_true, y_pred, title=None,
             transform=ax.transAxes, fontsize=FONT_LEGEND, va='top')
 
     mean, std, r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
-    ax.set_title(f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}",
-                 fontsize=FONT_LABEL)
+    ax.set_title(f"Mean Bias={mean:.1f}, Bias Std={std:.1f}, R²={r2:.2f}",
+                fontsize=FONT_LABEL)
 
     ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
     xt = ax.get_xticks()
@@ -247,8 +247,8 @@ def bias_hist_single(y_true, y_pred,
     ax.hist(res, bins=bins, range=rng, alpha=0.7)
     ax.axvline(mean, color='k', ls='--', lw=2)
 
-    ax.set_title(f"Mean Bias={mean:.2f},  Bias Std={std:.2f},  R²={r2:.2f}",
-                 fontsize=FONT_LABEL)
+    ax.set_title(f"Mean Bias={mean:.1f},  Bias Std={std:.1f},  R²={r2:.2f}",
+                fontsize=FONT_LABEL)
     ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
     ax.set_ylabel("Count",       fontsize=FONT_LABEL)
 

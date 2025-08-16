@@ -214,8 +214,8 @@ def plot_bias_hist(y_true, y_pred, title=None, rng=(-100, 300),
             fontsize=FONT_LEGEND, va='top')
 
     mean, std, r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
-    ax.set_title(f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}",
-                 fontsize=FONT_LABEL)
+    ax.set_title(f"Mean Bias={mean:.1f}, Bias Std={std:.1f}, R²={r2:.2f}",
+                fontsize=FONT_LABEL)
 
     # ── new x-axis label & selective tick labelling ───────────
     ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
@@ -299,8 +299,8 @@ def bias_hist_single(y_true, y_pred,
     ax.hist(res, bins=bins, range=rng, alpha=0.7)
     ax.axvline(mean, color='k', ls='--', lw=2)
 
-    ax.set_title(f"Mean Bias={mean:.2f},  Bias Std={std:.2f},  R²={r2:.2f}",
-                 fontsize=FONT_LABEL)
+    ax.set_title(f"Mean Bias={mean:.1f},  Bias Std={std:.1f},  R²={r2:.2f}",
+                fontsize=FONT_LABEL)
     ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
     ax.set_ylabel("Count",       fontsize=FONT_LABEL)
 
@@ -877,6 +877,33 @@ def rf_unburned_experiment(
 
     y_hat_te = rf.predict(X_te)
 
+    # --- NEW: 5% / 95% TEST-set metrics (overall + per-category) ---
+    try:
+        te_ext = snow_low5_mask[test_idx]   # boolean mask aligned with y_te / y_hat_te
+    except NameError:
+        te_ext = None
+
+    if te_ext is None:
+        print("\nExtreme-dry (0–5th percentile) metrics (TEST): [skip] no mask available.")
+        print("Non-extreme (remaining 95 %) metrics (TEST): [skip] no mask available.")
+    else:
+        # 5% (extreme) — TEST
+        print("\nExtreme-dry (0–5th percentile) metrics (TEST):")
+        _print_metrics(y_te[te_ext], y_hat_te[te_ext], "  OVERALL (low5, TEST)")
+        for c in (0, 1, 2, 3):
+            m = te_ext & (cat_te == c)
+            _print_metrics(y_te[m], y_hat_te[m], f"  cat {c} (low5, TEST)")
+
+        # 95% (non-extreme) — TEST
+        te_nonext = ~te_ext
+        print("\nNon-extreme (remaining 95 %) metrics (TEST):")
+        _print_metrics(y_te[te_nonext], y_hat_te[te_nonext], "  OVERALL (non-low5, TEST)")
+        for c in (0, 1, 2, 3):
+            m = te_nonext & (cat_te == c)
+            _print_metrics(y_te[m], y_hat_te[m], f"  cat {c} (non-low5, TEST)")
+    # ---------------------------------------------------------------
+
+
     # --- NEW test-set box-plots & histograms -------------------------------
     boxplot_dod_by_cat(y_te, y_hat_te, cat_te,
                     title_prefix="TEST 30 %")
@@ -919,19 +946,6 @@ def rf_unburned_experiment(
             m = extreme & (cat == c)
             _print_metrics(Yv[m], y_hat_all[m], f"  cat {c} (low5)")
 
-    # ===== NON-EXTREME (remaining 95%) METRICS – TEST SET =====
-    te_nonext = ~te_ext
-    print("\nNon-extreme (remaining 95 %) metrics (TEST):")
-
-    # Overall (TEST ∩ non-low5)
-    _print_metrics(y_te[te_nonext], yhat_te[te_nonext], "  OVERALL (non-low5, TEST)")
-
-    # Per burn category on TEST ∩ non-low5
-    for c in (0, 1, 2, 3):
-        m = te_nonext & (cat_te == c)
-        _print_metrics(y_te[m], yhat_te[m], f"  cat {c} (non-low5, TEST)")
-
-
     # ----------------------------------------------------------
     # 30 % cat 0 test‑set diagnostics (exact style match)
     # ----------------------------------------------------------
@@ -960,8 +974,10 @@ def rf_unburned_experiment(
         mean = (y_hat_all[mask_c0_test] - Yv[mask_c0_test]).mean()
         std  = (y_hat_all[mask_c0_test] - Yv[mask_c0_test]).std()
         r2   = r2_score(Yv[mask_c0_test], y_hat_all[mask_c0_test])
-        plot_bias_hist(Yv[mask_c0_test], y_hat_all[mask_c0_test],
-                       title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}")
+        plot_bias_hist(
+            Yv[mask_c0_test], y_hat_all[mask_c0_test],
+            title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}"
+        )
 
         # 3️⃣  pixel‑level bias map (NO title)
         obs_c0 = mean_per_pixel(pix_valid[mask_c0_test],
@@ -1047,9 +1063,8 @@ def rf_unburned_experiment(
         r2 = r2_score(Yv[m], y_hat_all[m])
         mean, std = (y_hat_all[m]-Yv[m]).mean(), (y_hat_all[m]-Yv[m]).std()
         plot_bias_hist(
-            Yv[m],
-            y_hat_all[m],
-            title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}"
+            Yv[m], y_hat_all[m],
+            title=f"Mean Bias={mean:.1f}, Bias Std={std:.1f}, R²={r2:.2f}"
         )
 
         # aggregate only the rows belonging to this category
