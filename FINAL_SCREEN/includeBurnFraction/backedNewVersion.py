@@ -26,6 +26,7 @@ import cartopy.feature as cfeature
 import cartopy.io.img_tiles as cimgt
 import geopandas as gpd
 from typing import List, Dict
+import socket
 
 # ────────────────────────────────────────────────────────────
 PIX_SZ = 0.5
@@ -169,8 +170,8 @@ def plot_bias_hist(y_true, y_pred, title=None,
             transform=ax.transAxes, fontsize=FONT_LEGEND, va='top')
 
     mean, std, r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
-    ax.set_title(f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}",
-                 fontsize=FONT_LABEL)
+    ax.set_title(f"Mean Bias={mean:.1f}, Bias Std={std:.1f}, R²={r2:.2f}",
+                fontsize=FONT_LABEL)
 
     ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
     xt = ax.get_xticks()
@@ -246,8 +247,8 @@ def bias_hist_single(y_true, y_pred,
     ax.hist(res, bins=bins, range=rng, alpha=0.7)
     ax.axvline(mean, color='k', ls='--', lw=2)
 
-    ax.set_title(f"Mean Bias={mean:.2f},  Bias Std={std:.2f},  R²={r2:.2f}",
-                 fontsize=FONT_LABEL)
+    ax.set_title(f"Mean Bias={mean:.1f},  Bias Std={std:.1f},  R²={r2:.2f}",
+                fontsize=FONT_LABEL)
     ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
     ax.set_ylabel("Count",       fontsize=FONT_LABEL)
 
@@ -258,6 +259,16 @@ def bias_hist_single(y_true, y_pred,
     ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
+
+def _print_metrics(y_true, y_pred, tag: str):
+    """Console-only metrics with a consistent format."""
+    if y_true.size == 0:
+        print(f"{tag}: N=0 (no samples)")
+        return
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    bias = (y_pred - y_true).mean()
+    r2   = r2_score(y_true, y_pred)
+    print(f"{tag}: N={y_true.size:5d}  RMSE={rmse:6.2f}  Bias={bias:7.2f}  R²={r2:6.3f}")
 
 
 def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
@@ -572,7 +583,7 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg,
 
 # ────────────────────────────────────────────────────────────
 # 5) Feature matrix
-def gather_features_nobf(ds, target="DOD"):
+def gather_features_nobf(ds, target="DSD"):
     excl = {target.lower(),'lat','lon','latitude','longitude',
             'pixel','year','ncoords_vector','nyears_vector',
             'aorcsummerhumidity','aorcsummerprecipitation',
@@ -586,7 +597,7 @@ def gather_features_nobf(ds, target="DOD"):
             feats[v] = np.tile(da.values, (ny,1))
     return feats
 
-def flatten_nobf(ds, target="DOD"):
+def flatten_nobf(ds, target="DSD"):
     fd = gather_features_nobf(ds,target)
     names = sorted(fd)
     X = np.column_stack([fd[n].ravel(order='C') for n in names])
@@ -611,7 +622,7 @@ def eval_bins(y, yp, burn):
 
 # ────────────────────────────────────────────────────────────
 # 7) Main RF experiment (70/30 per cat)
-def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
+def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat, snow_low5_mask=None):
     # flatten
     cat = cat2d.ravel(order='C')[ok]
     Xv, Yv = X[ok], y[ok]
@@ -636,6 +647,33 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
     X_te, y_te = Xv[te_idx], Yv[te_idx]
     yhat_te = rf.predict(X_te)
 
+    # ===== EXTREME-DRY (0–5th percentile snowfall proxy) METRICS – TEST SET =====
+    if snow_low5_mask is None:
+        print("\nExtreme-dry (0–5th percentile) metrics (TEST): [skip] no mask provided.")
+    else:
+        print("\nExtreme-dry (0–5th percentile) metrics (TEST):")
+        te_ext = snow_low5_mask[te_idx]   # align mask to TEST rows
+
+        # Overall (TEST ∩ low5)
+        _print_metrics(y_te[te_ext], yhat_te[te_ext], "  OVERALL (low5, TEST)")
+
+        # Per burn category on TEST ∩ low5
+        for c in (0, 1, 2, 3):
+            m = te_ext & (cat_te == c)
+            _print_metrics(y_te[m], yhat_te[m], f"  cat {c} (low5, TEST)")
+
+    # ===== NON-EXTREME (remaining 95%) METRICS – TEST SET =====
+    te_nonext = ~te_ext
+    print("\nNon-extreme (remaining 95 %) metrics (TEST):")
+
+    # Overall (TEST ∩ non-low5)
+    _print_metrics(y_te[te_nonext], yhat_te[te_nonext], "  OVERALL (non-low5, TEST)")
+
+    # Per burn category on TEST ∩ non-low5
+    for c in (0, 1, 2, 3):
+        m = te_nonext & (cat_te == c)
+        _print_metrics(y_te[m], yhat_te[m], f"  cat {c} (non-low5, TEST)")
+
     # A) per-category scatter & bias-hist
     for c in (0,1,2,3):
         m = cat_te==c
@@ -656,6 +694,18 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
                 burn_idx  = burn_c,
                 snow_idx  = snow_c
             )
+
+    # --- sequential Wilcoxon tests on TEST‑set bias -------------
+    bias_all_test = yhat_te - y_te
+    bias_by_cat   = {c: bias_all_test[cat_te == c]
+                     for c in (0, 1, 2, 3) if (cat_te == c).any()}
+
+    print("\n[TEST] Wilcoxon rank‑sum on pixel‑level bias distributions")
+    for a, b in [(1, 0), (2, 1), (3, 2)]:
+        if a in bias_by_cat and b in bias_by_cat:
+            s, p = ranksums(bias_by_cat[a], bias_by_cat[b])
+            print(f"  cat {a} vs cat {b} → stat={s:.3f}, p={p:.3g}")
+    # -------------------------------------------------------------
 
     # B) pixel-bias maps (no titles)
     
@@ -750,7 +800,7 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
                 s,p = ranksums(v0, vc)
                 print(f"Feat {pretty} c0 vs c{c}: stat={s:.3f}, p={p:.3g}")
 
-    return rf
+    return rf, bias_all_test, cat_te
 
 # ────────────────────────────────────────────────────────────
 # MAIN
@@ -772,7 +822,7 @@ if __name__=="__main__":
     log("categories computed")
 
     # flatten
-    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DOD")
+    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DSD")
     log("feature matrix ready (burn_fraction included)")
 
     # ─── snowfall-frequency proxy stratification ─────────────────
@@ -787,12 +837,36 @@ if __name__=="__main__":
     low_th, high_th = np.percentile(snowfreq_vals, [33, 67])
     snow_cat = np.digitize(snowfreq_vals, [low_th, high_th])       # 0 low | 1 mod | 2 high
 
+    # 0–5th percentile mask for “extreme dry winters”
+    snow_low5_thr  = np.percentile(snowfreq_vals, 5)
+    snow_low5_mask = snowfreq_vals <= snow_low5_thr     # 1-D, aligned with X_all[ok]/y_all[ok]
+    print(f"[snow-proxy] 5 % = {snow_low5_thr:.2f} days; N_low5={snow_low5_mask.sum()} / {snowfreq_vals.size}")
+
     print(f"[snow-proxy] 33 % = {low_th:.1f} days, 67 % = {high_th:.1f} days")
 
     # run experiment
-    rf_model = rf_experiment_nobf(
-    X_all, y_all,         # features / target
-    cat2d, ok, ds, feat_names,
-    snow_cat              # NEW positional argument
+    rf_model, exp3_bias, exp3_cat = rf_experiment_nobf(
+        X_all, y_all, cat2d, ok, ds, feat_names,
+        snow_cat,                     # existing arg
+        snow_low5_mask=snow_low5_mask # NEW
     )
+
+    import pandas as pd
+    from pathlib import Path
+
+    desktop = Path("/Users/yashnilmohanty/Desktop")
+    out_dir = desktop / "run3_bias_csv"
+    out_dir.mkdir(exist_ok=True)
+
+    for c in (0, 1, 2, 3):
+        sel = exp3_cat == c
+        if not sel.any():
+            continue
+        pd.DataFrame({"bias_days": exp3_bias[sel]}) \
+          .to_csv(out_dir / f"run3_bias_c{c}.csv",
+                  index=False, float_format="%.6g")
+        print(f"[WRITE] {out_dir}/run3_bias_c{c}.csv  (N={sel.sum()})")
+
+    print(f"[DONE] All Experiment‑3 bias files saved in: {out_dir}")
+
     log("ALL DONE (Experiment 3).")

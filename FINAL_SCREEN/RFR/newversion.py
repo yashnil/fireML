@@ -10,6 +10,7 @@ import numpy as np
 import numpy.random as npr
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
+from matplotlib.cm import ScalarMappable
 from scipy.stats import ranksums
 from scipy.stats import spearmanr
 from scipy.stats import gaussian_kde
@@ -593,14 +594,40 @@ _RELIEF = cfeature.NaturalEarthFeature(
             edgecolor="none", facecolor=cfeature.COLORS["land"])
 
 # --- keep this helper; we still need the extent -----------------
-def add_background(ax, extent_merc, zoom=6):
+from matplotlib.patches import Rectangle
+
+# --- keep this helper; we still need the extent -----------------
+def add_background(ax, extent_merc, zoom=6, fade_alpha=0.35, fade_color="white"):
+    """
+    Draw satellite/relief, then a translucent 'fade' sheet above it so the
+    background looks semi-transparent. Points stay fully opaque on top.
+    """
+    # 1) set view
     ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
-              crs=ccrs.PlateCarree())
+                  crs=ccrs.PlateCarree())
+
+    # 2) base layer: tiles or shaded relief (NO alpha here)
     try:
-        ax.add_image(TILER, zoom, interpolation="nearest")
+        ax.add_image(TILER, zoom, interpolation="nearest", zorder=0)
     except Exception as e:
         print("⚠︎ satellite tiles skipped:", e)
-        ax.add_feature(_RELIEF, zorder=0)   # shaded relief fallback
+        ax.add_feature(_RELIEF, zorder=0)   # fallback, no alpha
+
+    # 3) fade sheet above background, below data
+    ax.add_patch(
+        Rectangle(
+            (CA_LON_W, CA_LAT_S),
+            CA_LON_E - CA_LON_W,
+            CA_LAT_N - CA_LAT_S,
+            transform=ccrs.PlateCarree(),
+            facecolor=fade_color,
+            edgecolor="none",
+            alpha=fade_alpha,
+            zorder=1,   # below your scatter zorder=3
+        )
+    )
+
+    # 4) boundaries on top of fade/background
     STATES.boundary.plot(ax=ax, linewidth=.6, edgecolor="black", zorder=2)
 
 
@@ -655,25 +682,81 @@ def mean_per_pixel(pix_idx: np.ndarray,
     mean_val[mask] /= count[mask]
     return mean_val
 
-def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None):
+def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None,
+                vmin=-40, vmax=40, ax=None, add_cbar=True):
     merc = ccrs.epsg(3857)
     lat = ds["latitude"].values.ravel()
     lon = ds["longitude"].values.ravel()
-    x,y = merc.transform_points(ccrs.Geodetic(), lon[pix_idx], lat[pix_idx])[:,:2].T
-    bias = np.clip(y_pred - y_true, -40, 40)
-    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
-    add_background(ax, CA_EXTENT, zoom=6)
-    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
-                  crs=ccrs.PlateCarree())
-    sc = ax.scatter(x, y, c=bias, cmap="seismic_r",
-                    norm=TwoSlopeNorm(vmin=-40, vcenter=0, vmax=40),
-                    s=PIX_SZ, marker="s", transform=merc, zorder=3)
-    cb = plt.colorbar(sc, ax=ax, shrink=0.8, label="Bias (Days)")
-    cb.ax.tick_params(labelsize=FONT_TICK)
-    cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
-    plt.tight_layout()
-    plt.show()
+    x, y = merc.transform_points(ccrs.Geodetic(),
+                                 lon[pix_idx], lat[pix_idx])[:, :2].T
+    bias = np.clip(y_pred - y_true, vmin, vmax)
 
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6,5))
+        created_fig = True
+
+    add_background(ax, CA_EXTENT, zoom=6)
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N], crs=ccrs.PlateCarree())
+
+    norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+    sc = ax.scatter(x, y, c=bias, cmap="seismic_r", norm=norm,
+                    s=PIX_SZ, marker="s", transform=merc, zorder=3)
+
+    # ⬇️ no titles on bias maps
+    # (ignore `title` entirely)
+
+    if add_cbar:
+        cb = plt.colorbar(sc, ax=ax, shrink=0.8)
+        cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
+        cb.ax.tick_params(labelsize=FONT_TICK)
+
+    if created_fig:
+        plt.tight_layout()
+        plt.show()
+    return sc
+
+
+from matplotlib.cm import ScalarMappable
+from matplotlib.gridspec import GridSpec
+
+def plot_bias_maps_4panel_shared(ds, panels, vmin=-40, vmax=40, cmap="seismic_r"):
+    merc = ccrs.epsg(3857)
+
+    # Create a 1x5 grid: 4 map panels + 1 narrow colorbar column
+    fig = plt.figure(figsize=(16, 4))
+    gs  = fig.add_gridspec(
+        nrows=1, ncols=5,
+        width_ratios=[1, 1, 1, 1, 0.06],  # last is cbar
+        wspace=0.02
+    )
+
+    axs = [fig.add_subplot(gs[0, i], projection=merc) for i in range(4)]
+    cax = fig.add_subplot(gs[0, 4])  # dedicated colorbar axis
+
+    # Draw each category panel; NO per-axis colorbars or titles
+    for i, (ax, p) in enumerate(zip(axs, panels)):
+        bias_map_ca(
+            ds,
+            pix_idx=p["pix"],
+            y_true=p["y"],
+            y_pred=p["yp"],
+            vmin=vmin, vmax=vmax,
+            ax=ax, add_cbar=False,     # one shared cbar
+        )
+        # ⬇️ ensure no titles even if provided in panels[i]["title"]
+        # (do nothing; bias_map_ca ignores titles)
+
+    # Shared colorbar on its own axis (won’t overlap any subplot)
+    norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+    sm   = ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, cax=cax)
+    cbar.set_label("Bias (Days)", fontsize=FONT_LABEL, rotation=90, labelpad=10)
+    cbar.ax.tick_params(labelsize=FONT_TICK)
+
+    fig.tight_layout()
+    plt.show()
 
 
 def boxplot_dod_by_elev_veg(y, elev, veg, tag=None):
@@ -695,7 +778,8 @@ def boxplot_dod_by_elev_veg(y, elev, veg, tag=None):
     plt.show()
 
 def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag=None,
-                          elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500)):
+                          elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500),
+                          vmin=-15, vmax=15, ax=None, add_cbar=True):
     bias = y_pred - y_true
     elev_bin = np.digitize(elev, elev_edges) - 1
 
@@ -708,30 +792,26 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag=None,
             if sel.any():
                 grid[i, j] = np.nanmean(bias[sel])
 
-    # ── NEW: round to nearest integer for display & ensure −0 → 0
     grid_display = np.round(grid)
     grid_display[np.isclose(grid_display, 0)] = 0
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    im = ax.imshow(np.clip(grid, -15, 15),          # colour limits ±15
-                   cmap='seismic_r',
-                   vmin=-15, vmax=15,
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 4))
+        created_fig = True
+
+    im = ax.imshow(np.clip(grid, vmin, vmax),
+                   cmap='seismic_r', vmin=vmin, vmax=vmax,
                    origin='lower', aspect='auto')
 
     # cell borders + integer labels
     for i in range(grid.shape[0]):
         for j in range(grid.shape[1]):
-
             ax.add_patch(plt.Rectangle((j-0.5, i-0.5), 1, 1,
                                        ec='black', fc='none', lw=0.6))
-            
             val = grid_display[i, j]
-            if np.isnan(val):
-                continue
-
-            # ── new threshold: white if |val| ≥ 8 ───────────────
+            if np.isnan(val): continue
             txt_color = 'white' if abs(val) >= 8 else 'black'
-
             ax.text(j, i, f"{int(val):d}",
                     ha='center', va='center',
                     fontsize=FONT_LABEL,
@@ -745,10 +825,40 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag=None,
                         for k in range(len(elev_edges)-1)],
                        fontsize=FONT_TICK)
 
-    cb = plt.colorbar(im, ax=ax, label="Bias (Days)")
-    cb.ax.tick_params(labelsize=FONT_TICK)
-    cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
-    plt.tight_layout()
+    if add_cbar:
+        cb = plt.colorbar(im, ax=ax, label="Bias (Days)")
+        cb.ax.tick_params(labelsize=FONT_TICK)
+        cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
+
+    if created_fig:
+        plt.tight_layout()
+        plt.show()
+
+    return im
+
+def plot_heat_bias_4panel_shared(panels,     # list of dicts: [{"y":..,"yp":..,"elev":..,"veg":..,"title":..}, x4]
+                                 vmin=-15, vmax=15):
+    fig, axs = plt.subplots(1, 4, figsize=(18, 4))
+    ims = []
+    for i, p in enumerate(panels):
+        im = heat_bias_by_elev_veg(p["y"], p["yp"],
+                                   p["elev"], p["veg"],
+                                   tag=None, vmin=vmin, vmax=vmax,
+                                   ax=axs[i], add_cbar=False)
+        axs[i].set_title(p.get("title", f"cat {i}"))
+        ims.append(im)
+
+    # shared colorbar (symmetric range)
+    from matplotlib.colors import TwoSlopeNorm
+    norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
+    sm = ScalarMappable(norm=norm, cmap='seismic_r')
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axs.ravel().tolist(),
+                        location="right", fraction=0.046, pad=0.04)
+    cbar.set_label("Bias (Days)", fontsize=FONT_LABEL)
+    cbar.ax.tick_params(labelsize=FONT_TICK)
+
+    fig.tight_layout()
     plt.show()
 
 def _print_metrics(y_true, y_pred, tag: str):
@@ -1060,6 +1170,8 @@ def rf_unburned_experiment(
     # ----------------------------------------------------------------
 
     pix_valid = pix_full[ok]  # pixel index per row of Xv/Yv
+    _panels_bias = []
+    _panels_heat = []
 
     for c in range(4):
         m = cat == c
@@ -1101,7 +1213,13 @@ def rf_unburned_experiment(
                     obs_c_mean [pix_c],    # y_true  (mean observed)
                     pred_c_mean[pix_c],    # y_pred  (mean predicted)
                     f"Pixel Bias – cat {c} (thr={thr})")
-
+        
+        _panels_bias.append({
+            "pix": pix_c,
+            "y":   obs_c_mean [pix_c],
+            "yp":  pred_c_mean[pix_c],
+            "title": f"cat {c}"
+        })
 
         # per‑category Elev×Veg box‑plot
         elev = ds["Elevation"].values.ravel(order="C")[ok][m]
@@ -1113,6 +1231,14 @@ def rf_unburned_experiment(
         heat_bias_by_elev_veg(Yv[m], y_hat_all[m], elev, veg,
                       f"Elev×Veg Bias – cat {c} (thr={thr})")
         
+        _panels_heat.append({
+            "y":    Yv[m],
+            "yp":   y_hat_all[m],
+            "elev": elev,
+            "veg":  veg,
+            "title": f"cat {c}"
+        })
+        
         # ─── NEW: 12 individual snow-stratified bias plots ───
         for s in (0, 1, 2):
             mask = (cat == c) & (snow_cat == s)
@@ -1122,6 +1248,12 @@ def rf_unburned_experiment(
                 burn_idx  = c,
                 snow_idx  = s
             )
+    
+    if len(_panels_bias) == 4:
+        plot_bias_maps_4panel_shared(ds, _panels_bias, vmin=-40, vmax=40)
+
+    if len(_panels_heat) == 4:
+        plot_heat_bias_4panel_shared(_panels_heat, vmin=-15, vmax=15)
 
     if 0 in bias_by_cat:
         print("\nWilcoxon rank‑sum (bias difference vs cat 0)")

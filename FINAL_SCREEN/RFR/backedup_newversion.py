@@ -77,6 +77,17 @@ NICE_NAME["aorcSpringTemperature"]   = "Spring Temperature (K)"
 NICE_NAME["aorcWinterPrecipitation"] = "Winter Precipitation (mm/day)"
 NICE_NAME["aorcSpringShortwave"]     = "Spring Shortwave↓ (W/m⁻²)"
 
+# ------------------------------------------------------------------
+#  Clean labels for the two Top‑10 importance plots
+# ------------------------------------------------------------------
+UNITS_TO_STRIP = ["(mm)", "(K)", "(m)", "(mm/day)", "(W/m⁻²)"]
+
+def strip_units(label: str) -> str:
+    """Remove the listed unit substrings and tidy spaces/underscores."""
+    for u in UNITS_TO_STRIP:
+        label = label.replace(u, "")
+    return label.replace("_", " ").strip()
+
 # ────────────────────────────────────────────────────────────
 #  pretty timer
 # ────────────────────────────────────────────────────────────
@@ -203,8 +214,8 @@ def plot_bias_hist(y_true, y_pred, title=None, rng=(-100, 300),
             fontsize=FONT_LEGEND, va='top')
 
     mean, std, r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
-    ax.set_title(f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}",
-                 fontsize=FONT_LABEL)
+    ax.set_title(f"Mean Bias={mean:.1f}, Bias Std={std:.1f}, R²={r2:.2f}",
+                fontsize=FONT_LABEL)
 
     # ── new x-axis label & selective tick labelling ───────────
     ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
@@ -288,8 +299,8 @@ def bias_hist_single(y_true, y_pred,
     ax.hist(res, bins=bins, range=rng, alpha=0.7)
     ax.axvline(mean, color='k', ls='--', lw=2)
 
-    ax.set_title(f"Mean Bias={mean:.2f},  Bias Std={std:.2f},  R²={r2:.2f}",
-                 fontsize=FONT_LABEL)
+    ax.set_title(f"Mean Bias={mean:.1f},  Bias Std={std:.1f},  R²={r2:.2f}",
+                fontsize=FONT_LABEL)
     ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
     ax.set_ylabel("Count",       fontsize=FONT_LABEL)
 
@@ -310,7 +321,7 @@ def plot_top10_features(rf, names):
     ax.bar(range(10), imp[idx])
     ax.set_xticks(range(10))
     ax.set_xticklabels(
-        [NICE_NAME.get(names[i], names[i]) for i in idx],
+        [strip_units(NICE_NAME.get(names[i], names[i])) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
     ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
@@ -328,7 +339,7 @@ def plot_permutation_importance(rf, X_val, y_val, names):
     ax.bar(range(10), imp[idx])
     ax.set_xticks(range(10))
     ax.set_xticklabels(
-        [NICE_NAME.get(names[i], names[i]) for i in idx],
+        [strip_units(NICE_NAME.get(names[i], names[i])) for i in idx],
         rotation=45, ha='right', fontsize=FONT_TICK
     )
     ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
@@ -456,7 +467,7 @@ def plot_top5_feature_scatter_binned(
 # EXTRA DIAGNOSTIC PLOTS  (box-plots & histograms)
 # ------------------------------------------------------------------
 def boxplot_dod_by_cat(y_obs, y_pred, cat, title_prefix, fname_base=None):
-    """Two side-by-side box-plots: observed & predicted DOD per category."""
+    """Two side-by-side box-plots: observed & predicted DSD per category."""
     cats = [0, 1, 2, 3]
     data_obs = [y_obs[cat == c] for c in cats]
     data_pred = [y_pred[cat == c] for c in cats]
@@ -740,12 +751,22 @@ def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag=None,
     plt.tight_layout()
     plt.show()
 
+def _print_metrics(y_true, y_pred, tag: str):
+    """Console-only metrics with a consistent format."""
+    from sklearn.metrics import mean_squared_error, r2_score
+    if y_true.size == 0:
+        print(f"{tag}: N=0 (no samples)")
+        return
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    bias = (y_pred - y_true).mean()
+    r2   = r2_score(y_true, y_pred)
+    print(f"{tag}: N={y_true.size:5d}  RMSE={rmse:6.2f}  Bias={bias:7.2f}  R²={r2:6.3f}")
 
 
 # ────────────────────────────────────────────────────────────
 #  helpers to build feature matrix (burn_fraction excluded)
 # ────────────────────────────────────────────────────────────
-def gather_features_nobf(ds, target="DOD"):
+def gather_features_nobf(ds, target="DSD"):
     excl = {target.lower(),'lat','lon','latitude','longitude',
             'pixel','year','ncoords_vector','nyears_vector',
             'burn_fraction','burn_cumsum','aorcsummerhumidity',
@@ -769,7 +790,7 @@ def gather_features_nobf(ds, target="DOD"):
     return feats
 
 
-def flatten_nobf(ds, target="DOD"):
+def flatten_nobf(ds, target="DSD"):
     fd = gather_features_nobf(ds, target)
     names = sorted(fd)
     X = np.column_stack([fd[n].ravel(order="C") for n in names])
@@ -856,6 +877,33 @@ def rf_unburned_experiment(
 
     y_hat_te = rf.predict(X_te)
 
+    # --- NEW: 5% / 95% TEST-set metrics (overall + per-category) ---
+    try:
+        te_ext = snow_low5_mask[test_idx]   # boolean mask aligned with y_te / y_hat_te
+    except NameError:
+        te_ext = None
+
+    if te_ext is None:
+        print("\nExtreme-dry (0–5th percentile) metrics (TEST): [skip] no mask available.")
+        print("Non-extreme (remaining 95 %) metrics (TEST): [skip] no mask available.")
+    else:
+        # 5% (extreme) — TEST
+        print("\nExtreme-dry (0–5th percentile) metrics (TEST):")
+        _print_metrics(y_te[te_ext], y_hat_te[te_ext], "  OVERALL (low5, TEST)")
+        for c in (0, 1, 2, 3):
+            m = te_ext & (cat_te == c)
+            _print_metrics(y_te[m], y_hat_te[m], f"  cat {c} (low5, TEST)")
+
+        # 95% (non-extreme) — TEST
+        te_nonext = ~te_ext
+        print("\nNon-extreme (remaining 95 %) metrics (TEST):")
+        _print_metrics(y_te[te_nonext], y_hat_te[te_nonext], "  OVERALL (non-low5, TEST)")
+        for c in (0, 1, 2, 3):
+            m = te_nonext & (cat_te == c)
+            _print_metrics(y_te[m], y_hat_te[m], f"  cat {c} (non-low5, TEST)")
+    # ---------------------------------------------------------------
+
+
     # --- NEW test-set box-plots & histograms -------------------------------
     boxplot_dod_by_cat(y_te, y_hat_te, cat_te,
                     title_prefix="TEST 30 %")
@@ -878,6 +926,34 @@ def rf_unburned_experiment(
 
     # ── B. evaluate on all valid samples ──────────────────────
     y_hat_all = rf.predict(Xv)
+
+    # ===== EXTREME-DRY (0–5th percentile snowfall proxy) METRICS =====
+    # Uses globals computed in MAIN: snow_low5_mask (row-aligned with Yv/Xv) and cat
+    try:
+        extreme = snow_low5_mask  # boolean mask aligned with Yv/Xv
+    except NameError:
+        extreme = None
+
+    print("\nExtreme-dry (0–5th percentile snowfall proxy) metrics:")
+    if extreme is None:
+        print("  [WARN] snow_low5_mask not defined; skip extreme-dry analysis.")
+    else:
+        # overall
+        _print_metrics(Yv[extreme], y_hat_all[extreme], "  OVERALL (low5)")
+
+        # per burn category c0..c3
+        for c in range(4):
+            m = extreme & (cat == c)
+            _print_metrics(Yv[m], y_hat_all[m], f"  cat {c} (low5)")
+
+    # ----- NON-EXTREME (remaining 95%) — FULL SAMPLE (ALL data) -----
+    nonext = ~extreme
+    print("\nNon-extreme (remaining 95 %) metrics (ALL data):")
+    _print_metrics(Yv[nonext], y_hat_all[nonext], "  OVERALL (non-low5)")
+    for c in range(4):
+        m = nonext & (cat == c)
+        _print_metrics(Yv[m], y_hat_all[m], f"  cat {c} (non-low5)")
+    # ---------------------------------------------------------------
 
     # ----------------------------------------------------------
     # 30 % cat 0 test‑set diagnostics (exact style match)
@@ -907,8 +983,10 @@ def rf_unburned_experiment(
         mean = (y_hat_all[mask_c0_test] - Yv[mask_c0_test]).mean()
         std  = (y_hat_all[mask_c0_test] - Yv[mask_c0_test]).std()
         r2   = r2_score(Yv[mask_c0_test], y_hat_all[mask_c0_test])
-        plot_bias_hist(Yv[mask_c0_test], y_hat_all[mask_c0_test],
-                       title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}")
+        plot_bias_hist(
+            Yv[mask_c0_test], y_hat_all[mask_c0_test],
+            title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}"
+        )
 
         # 3️⃣  pixel‑level bias map (NO title)
         obs_c0 = mean_per_pixel(pix_valid[mask_c0_test],
@@ -973,6 +1051,14 @@ def rf_unburned_experiment(
     bias_all = y_hat_all - Yv
     bias_by_cat = {c: bias_all[cat == c] for c in range(4) if (cat == c).any()}
 
+    # ---------- NEW: rank‑sum p‑values for sequential pairs ----------
+    print("\nWilcoxon rank‑sum on pixel‑level bias distributions")
+    for a, b in [(1, 0), (2, 1), (3, 2)]:
+        if a in bias_by_cat and b in bias_by_cat:
+            stat, p = ranksums(bias_by_cat[a], bias_by_cat[b])
+            print(f"  cat {a} vs cat {b} → stat={stat:.3f}, p={p:.3g}")
+    # ----------------------------------------------------------------
+
     pix_valid = pix_full[ok]  # pixel index per row of Xv/Yv
 
     for c in range(4):
@@ -986,9 +1072,8 @@ def rf_unburned_experiment(
         r2 = r2_score(Yv[m], y_hat_all[m])
         mean, std = (y_hat_all[m]-Yv[m]).mean(), (y_hat_all[m]-Yv[m]).std()
         plot_bias_hist(
-            Yv[m],
-            y_hat_all[m],
-            title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}"
+            Yv[m], y_hat_all[m],
+            title=f"Mean Bias={mean:.1f}, Bias Std={std:.1f}, R²={r2:.2f}"
         )
 
         # aggregate only the rows belonging to this category
@@ -1081,6 +1166,15 @@ def rf_unburned_experiment(
             metrics[c]['rmse'].append(np.sqrt(mean_squared_error(y_s, yhat)))
             metrics[c]['r2'  ].append(r2_score(y_s, yhat))
 
+    # ---------- NEW: rank‑sum on down‑sampled mean biases ----------
+    print("\nWilcoxon rank‑sum on DOWN‑SAMPLED mean bias (100 runs)")
+    for a, b in [(1, 0), (2, 1), (3, 2)]:
+        if a in metrics and b in metrics:
+            stat, p = ranksums(metrics[a]['bias'], metrics[b]['bias'])
+            print(f"  cat {a} vs cat {b} → stat={stat:.3f}, p={p:.3g}")
+    # ----------------------------------------------------------------
+
+
     # ── merged histogram figure ───────────────────────────────
     
     orig_stats = {}
@@ -1145,7 +1239,7 @@ def rf_unburned_experiment(
             stat, p = ranksums(data0, datac)
             print(f"  {fname}: cat{c} vs cat0 → statistic={stat:.3f}, p={p:.3e}")
 
-    return rf
+    return rf, bias_all, cat
 
 
 # ────────────────────────────────────────────────────────────
@@ -1171,7 +1265,7 @@ if __name__ == "__main__":
     log("categories (c0‑c3) computed")
 
     # build feature matrix (burn_fraction excluded)
-    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DOD")
+    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DSD")
 
     # ─── snowfall-frequency proxy stratification ─────────────────
     log("building snow-event-frequency proxy from seasonal means …")
@@ -1187,6 +1281,12 @@ if __name__ == "__main__":
     low_th , high_th = np.percentile(snowfreq_vals, [33, 67])
     snow_cat = np.digitize(snowfreq_vals, [low_th, high_th])      # 0,1,2
 
+    # 0–5th percentile mask for “extreme dry winters”
+    snow_low5_thr = np.percentile(snowfreq_vals, 5)
+    snow_low5_mask = snowfreq_vals <= snow_low5_thr
+    print(f"[snow-proxy] 5 % threshold = {snow_low5_thr:.2f} days; "
+        f"N_low5 = {snow_low5_mask.sum()} / {snowfreq_vals.size}")
+
     print(f"[snow-proxy] 33 %={low_th:.1f} days, 67 %={high_th:.1f} days")
 
     ds["winterSnowFreqProxy"] = (("year", "pixel"), snowfreq)
@@ -1201,14 +1301,43 @@ if __name__ == "__main__":
 
     # ── run #1 : unburned = cat 0 only  ───────────────────────────
     log("\n=== RUN #1 : unburned = cat 0 (cumsum < 0.25) ===")
-    rf_run1 = rf_unburned_experiment(
+    rf_run1, run1_bias, run1_cat = rf_unburned_experiment(
         X_all, y_all, cat_2d, ok, ds, feat_names, unburned_max_cat=0
     )
 
     # ── run #2 : unburned = cat 0 + 1  ───────────────────────────
     log("\n=== RUN #2 : unburned = cat 0 + 1 (cumsum < 0.50) ===")
-    rf_run2 = rf_unburned_experiment(
+    rf_run2, rf_run2_bias, run2_cat = rf_unburned_experiment(
         X_all, y_all, cat_2d, ok, ds, feat_names, unburned_max_cat=1
     )
+
+    import pandas as pd
+    from pathlib import Path
+
+    desktop = Path("/Users/yashnilmohanty/Desktop")      # adjust if needed
+    out_dir = desktop / "run1_bias_csv"
+    out_dir.mkdir(exist_ok=True)
+
+    # --- rebuild the 30 % test indices for cat 0 -------------------------
+    cat0_rows   = np.where(run1_cat == 0)[0]             # rows belonging to cat 0
+    _, c0_test  = train_test_split(
+                    cat0_rows, test_size=0.30, random_state=42)
+    c0_mask     = np.zeros_like(run1_cat, dtype=bool)
+    c0_mask[c0_test] = True
+    # --------------------------------------------------------------------
+
+    for c in (0, 1, 2, 3):
+        if c == 0:
+            sel = c0_mask           # ← use only the 30 % test set
+        else:
+            sel = run1_cat == c
+        if not sel.any():
+            continue
+        df = pd.DataFrame({"bias_days": run1_bias[sel]})
+        outfile = out_dir / f"run1_bias_c{c}.csv"
+        df.to_csv(outfile, index=False, float_format="%.6g")
+        print(f"[WRITE] {outfile}  (N={len(df)})")
+
+    print(f"[DONE]  All Run‑1 bias files saved in: {out_dir}")
 
     log("ALL DONE.")
