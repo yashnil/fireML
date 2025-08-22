@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================
-#  Fire-ML evaluation on final_dataset4.nc (Experiment 2)
+#  Fire-ML evaluation on final_dataset4.nc (Experiment 3)
 #  70 %/30 % category-split, whisker plots + uniform-scale maps
 #  burn_fraction included in predictors
 # ============================================================

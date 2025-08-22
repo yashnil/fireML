@@ -17,6 +17,7 @@ import cartopy.feature as cfeature
 import cartopy.io.img_tiles as cimgt
 import geopandas as gpd
 from scipy.stats import gaussian_kde
+from matplotlib.patches import Rectangle
 
 # ─── GLOBAL SETTINGS ──────────────────────────────────────────
 PIX_SZ      = 0.5
@@ -176,21 +177,70 @@ def plot_bias_hist(y_true, y_pred, title=None,
     plt.tight_layout()
     plt.show()
 
-def _add_background(ax, zoom=6):
-    ax.set_extent([CA_LON_W,CA_LON_E,CA_LAT_S,CA_LAT_N], crs=ccrs.PlateCarree())
-    if USE_SAT:
-        try:
-            tiler = cimgt.GoogleTiles(style='satellite'); tiler.request_timeout=5
-            ax.add_image(tiler, zoom)
-        except:
-            ax.add_feature(cfeature.NaturalEarthFeature(
-                "physical","shaded_relief","10m",
-                edgecolor="none", facecolor=cfeature.COLORS["land"]), zorder=0)
-    else:
-        ax.add_feature(cfeature.NaturalEarthFeature(
-            "physical","shaded_relief","10m",
-            edgecolor="none", facecolor=cfeature.COLORS["land"]), zorder=0)
+from matplotlib.cm import ScalarMappable
+
+def plot_bias_maps_4panel_shared(ds, panels, cmap="seismic_r", add_titles=True):
+    merc = ccrs.epsg(3857)
+
+    fig = plt.figure(figsize=(16, 4))
+    gs  = fig.add_gridspec(nrows=1, ncols=5,
+                           width_ratios=[1, 1, 1, 1, 0.06],
+                           wspace=0.02)
+
+    axs = [fig.add_subplot(gs[0, i], projection=merc) for i in range(4)]
+    cax = fig.add_subplot(gs[:, 4])
+
+    # draw each map without a per-axis colorbar
+    for i, (ax, p) in enumerate(zip(axs, panels)):
+        bias_map_ca(
+            ds,
+            pix_idx=p["pix"],
+            y_true=p["y"],
+            y_pred=p["yp"],
+            ax=ax,
+            add_cbar=False,
+            title=(p.get("title", f"cat {i}") if add_titles else None)
+        )
+
+    # shared colorbar
+    norm = TwoSlopeNorm(vmin=-40, vcenter=0, vmax=40)
+    sm   = ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
+    cbar = fig.colorbar(sm, cax=cax)
+    cbar.set_label("Bias (Days)", fontsize=FONT_LABEL)
+    cbar.ax.tick_params(labelsize=FONT_TICK)
+
+    fig.tight_layout(); plt.show()
+
+def add_background(ax, zoom=6, fade_alpha=0.35, fade_color="white"):
+    # geographic extent
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N], crs=ccrs.PlateCarree())
+
+    # 1) draw the basemap tiles (no alpha here)
+    try:
+        tiler = cimgt.GoogleTiles(style='satellite'); tiler.request_timeout = 5
+        ax.add_image(tiler, zoom, interpolation="nearest", zorder=0)
+    except Exception:
+        ax.add_feature(
+            cfeature.NaturalEarthFeature("physical", "shaded_relief", "10m",
+                                         edgecolor="none", facecolor=cfeature.COLORS["land"]),
+            zorder=0
+        )
+
+    # 2) add a semi-transparent white "fade sheet" ABOVE the tiles
+    ax.add_patch(
+        Rectangle(
+            (CA_LON_W, CA_LAT_S),
+            CA_LON_E - CA_LON_W,
+            CA_LAT_N - CA_LAT_S,
+            transform=ccrs.PlateCarree(),
+            facecolor=fade_color, edgecolor="none",
+            alpha=fade_alpha, zorder=1
+        )
+    )
+
+    # 3) borders ABOVE the fade (and below your data points)
     STATES.boundary.plot(ax=ax, lw=0.6, edgecolor="black", zorder=2)
+
 
 def dod_map_ca(ds, pix_idx, values,
                cmap="Blues", vmin=50, vmax=250):
@@ -199,7 +249,7 @@ def dod_map_ca(ds, pix_idx, values,
     x,y = merc.transform_points(ccrs.Geodetic(),
                                 lon[pix_idx], lat[pix_idx])[:,:2].T
     fig, ax = plt.subplots(subplot_kw={"projection":merc}, figsize=(6,5))
-    _add_background(ax)
+    add_background(ax)
     sc = ax.scatter(x, y, c=values,
                     cmap=cmap, vmin=vmin, vmax=vmax,
                     s=1, marker="s", transform=merc, zorder=3)
@@ -238,30 +288,34 @@ def mean_per_pixel(pix_idx: np.ndarray,
     return mean_val
 
 def bias_map_ca(ds, pix_idx, y_true, y_pred):
-    """Bias map capped at ±40 days (colour) and using PIX_SZ symbol size."""
+    """Bias map with dimmed basemap, symmetric ±40 TwoSlopeNorm, no title."""
     merc = ccrs.epsg(3857)
     lat  = ds["latitude"].values.ravel()
     lon  = ds["longitude"].values.ravel()
     x, y = merc.transform_points(ccrs.Geodetic(),
                                  lon[pix_idx], lat[pix_idx])[:, :2].T
-    bias = np.clip(y_pred - y_true, -40, 40)
+
+    vmin, vmax = -40, 40
+    bias = np.clip(y_pred - y_true, vmin, vmax)
 
     fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6, 5))
-    _add_background(ax)
-    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
-                  crs=ccrs.PlateCarree())
+    add_background(ax, zoom=6, fade_alpha=0.35)
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N], crs=ccrs.PlateCarree())
 
     sc = ax.scatter(x, y, c=bias,
                     cmap="seismic_r",
-                    norm=TwoSlopeNorm(vmin=-40, vcenter=0, vmax=40),
+                    norm=TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax),
                     s=PIX_SZ, marker="s",
                     transform=merc, zorder=3)
 
-    cb = plt.colorbar(sc, ax=ax, shrink=0.8)
-    cb.ax.tick_params(labelsize=FONT_TICK)
-    cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
+    cbar = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Bias (Days)", fontsize=FONT_LABEL)
+    cbar.ax.tick_params(labelsize=FONT_TICK)
+
+    # no title on purpose
     plt.tight_layout()
     plt.show()
+
 
 # ─── ELEV×VEG PLOTS ────────────────────────────────────────────
 def boxplot_dod_by_elev_veg(y, elev, veg):

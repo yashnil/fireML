@@ -17,9 +17,10 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import cartopy.io.img_tiles as cimgt
 import geopandas as gpd
+from scipy.stats import gaussian_kde
 
 # ─── GLOBAL SETTINGS ──────────────────────────────────────────
-PIX_SZ      = 1
+PIX_SZ      = 0.5          # 0.5-km squares   ← was 1
 FONT_LABEL  = 14
 FONT_TICK   = 12
 FONT_LEGEND = 12
@@ -100,38 +101,70 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
     ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout(); plt.show()
 
-def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx, gridsize=80):
-    mask = (cat==cat_idx)
-    x, y = y_pred[mask], y_true[mask]
-    fig, ax = plt.subplots(figsize=(6,6))
-    hb = ax.hexbin(x, y, gridsize=gridsize, cmap='inferno', mincnt=1)
-    mn, mx = float(min(x.min(), y.min())), float(max(x.max(), y.max()))
-    pad = (mx - mn) * 0.05
-    ax.plot([mn,mx],[mn,mx],'k--', lw=1)
-    ax.set_xlim(mn-pad, mx+pad); ax.set_ylim(mn-pad, mx+pad)
-    ax.set_aspect('equal','box')
-    ticks = ax.get_yticks(); ax.set_xticks(ticks)
-    ax.set_xlabel("Predicted DSD", fontsize=FONT_LABEL)
-    ax.set_ylabel("Observed DSD", fontsize=FONT_LABEL)
-    ax.tick_params(labelsize=FONT_TICK)
-    cbar = fig.colorbar(hb, ax=ax, shrink=0.8, label="Counts")
-    cbar.ax.tick_params(labelsize=FONT_TICK)
-    plt.tight_layout(); plt.show()
+def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx,
+                                point_size: int = 4,
+                                cmap: str = "inferno",
+                                kde_sample_max: int = 40_000):
+    """
+    Heat-density scatter for a single burn-category.
+    • Gaussian-KDE on ≤ kde_sample_max points (random subset if more)
+    • identical axes / aspect as the plain scatter
+    • **no colour-bar**  (per spec)
+    """
+    sel = (cat == cat_idx)
+    x, y = y_pred[sel], y_true[sel]
+    if x.size == 0:
+        return
 
-def plot_bias_hist(y_true, y_pred, title=None, rng=(-100,300)):
+    # ---- density --------------------------------------------------------
+    if x.size <= kde_sample_max:
+        z = gaussian_kde(np.vstack([x, y]))(np.vstack([x, y]))
+    else:
+        sub = np.random.choice(x.size, kde_sample_max, replace=False)
+        kde = gaussian_kde(np.vstack([x[sub], y[sub]]))
+        z   = kde(np.vstack([x, y]))
+
+    order = z.argsort()
+    x, y, z = x[order], y[order], z[order]
+
+    # ---- plot -----------------------------------------------------------
+    mn, mx = float(min(x.min(), y.min())), float(max(x.max(), y.max()))
+    pad    = (mx - mn) * 0.05
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(x, y, c=z, s=point_size, cmap=cmap, rasterized=True)
+    ax.plot([mn, mx], [mn, mx], 'k--', lw=1)
+    ax.set_xlim(mn - pad, mx + pad)
+    ax.set_ylim(mn - pad, mx + pad)
+    ax.set_aspect('equal', 'box')
+    ax.set_xlabel("Predicted DSD", fontsize=FONT_LABEL)
+    ax.set_ylabel("Observed DSD",  fontsize=FONT_LABEL)
+    ax.tick_params(labelsize=FONT_TICK)
+    plt.tight_layout()
+    plt.show()
+
+def plot_bias_hist(y_true, y_pred, title=None,
+                   rng=(-100, 300), tick_limit: int = 100):
+    """Histogram with ±100-day labelled ticks and x-axis “Bias (Days)”."""
     res = y_pred - y_true
-    fig, ax = plt.subplots(figsize=(6,4))
+    fig, ax = plt.subplots(figsize=(6, 4))
     ax.hist(res, bins=50, range=rng, alpha=0.7)
     ax.axvline(res.mean(), color='k', ls='--', lw=2)
-    ax.text(0.02,0.95,f"N={len(y_true)}", transform=ax.transAxes,
-            fontsize=FONT_LEGEND, va='top')
-    mean,std,r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
+    ax.text(0.02, 0.95, f"N={len(y_true)}",
+            transform=ax.transAxes, fontsize=FONT_LEGEND, va='top')
+
+    mean, std, r2 = res.mean(), res.std(), r2_score(y_true, y_pred)
     ax.set_title(f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}",
                  fontsize=FONT_LABEL)
-    ax.set_xlabel("Bias (Pred − Obs, Days)", fontsize=FONT_LABEL)
-    ax.set_ylabel("Count",       fontsize=FONT_LABEL)
+
+    ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
+    xt = ax.get_xticks()
+    ax.set_xticklabels([f"{t:g}" if abs(t) <= tick_limit else "" for t in xt])
+
+    ax.set_ylabel("Count", fontsize=FONT_LABEL)
     ax.tick_params(labelsize=FONT_TICK)
-    plt.tight_layout(); plt.show()
+    plt.tight_layout()
+    plt.show()
 
 def _add_background(ax, zoom=6):
     ax.set_extent([CA_LON_W,CA_LON_E,CA_LAT_S,CA_LAT_N], crs=ccrs.PlateCarree())
@@ -159,29 +192,61 @@ def dod_map_ca(ds, pix_idx, values, cmap="Blues", vmin=50, vmax=250):
     plt.colorbar(sc, ax=ax, shrink=0.8, label="DSD (Days)")
     plt.tight_layout(); plt.show()
 
-def bias_map_ca(ds, pix_idx, y_true, y_pred):
+# ── helper: aggregate a 1-D sample vector to a per-pixel mean ────────────
+def mean_per_pixel(pix_idx: np.ndarray,
+                   values:   np.ndarray,
+                   n_pix:    int) -> np.ndarray:
     """
-    Plot clipped bias (Pred – Obs) per pixel, using a diverging scale.
-    Colorbar label now uses FONT_LABEL.
-    """
-    lat = ds["latitude"].values.ravel()
-    lon = ds["longitude"].values.ravel()
-    x, y = merc.transform_points(ccrs.Geodetic(), lon[pix_idx], lat[pix_idx])[:,:2].T
+    Parameters
+    ----------
+    pix_idx : 1-D array of pixel IDs, one per sample row
+    values  : 1-D array of the same length with the variable to average
+    n_pix   : total number of pixels in the dataset (ds.sizes['pixel'])
 
-    bias = np.clip(y_pred - y_true, -60, 60)
-    fig, ax = plt.subplots(subplot_kw={"projection":merc}, figsize=(6,5))
+    Returns
+    -------
+    mean_val : np.ndarray  (length = n_pix)
+        NaN for pixels that have no valid samples.
+    """
+    mean_val = np.full(n_pix, np.nan, dtype=np.float32)
+    count    = np.zeros(n_pix,  dtype=np.uint32)
+
+    for pid, val in zip(pix_idx, values):
+        if np.isfinite(val):
+            if np.isnan(mean_val[pid]):
+                mean_val[pid] = 0.0
+            mean_val[pid] += val
+            count[pid]    += 1
+
+    mask = count > 0
+    mean_val[mask] /= count[mask]
+    return mean_val
+
+def bias_map_ca(ds, pix_idx, y_true, y_pred):
+    """Pixel-bias map, colour-limited to ±40 days."""
+    merc = ccrs.epsg(3857)
+    lat  = ds["latitude"].values.ravel()
+    lon  = ds["longitude"].values.ravel()
+    x, y = merc.transform_points(ccrs.Geodetic(),
+                                 lon[pix_idx], lat[pix_idx])[:, :2].T
+    bias = np.clip(y_pred - y_true, -40, 40)
+
+    fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6, 5))
     _add_background(ax)
-    sc = ax.scatter(
-        x, y, c=bias,
-        cmap="seismic_r",
-        norm=TwoSlopeNorm(vmin=-60, vcenter=0, vmax=60),
-        s=1, marker="s", transform=merc, zorder=3
-    )
-    cbar = fig.colorbar(sc, ax=ax, shrink=0.8)
-    cbar.ax.tick_params(labelsize=FONT_TICK)
-    cbar.set_label("Bias (Days)", fontsize=FONT_LABEL)
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
+                  crs=ccrs.PlateCarree())
+
+    sc = ax.scatter(x, y, c=bias,
+                    cmap="seismic_r",
+                    norm=TwoSlopeNorm(vmin=-40, vcenter=0, vmax=40),
+                    s=PIX_SZ, marker="s", transform=merc, zorder=3)
+
+    cb = plt.colorbar(sc, ax=ax, shrink=0.8)
+    cb.ax.tick_params(labelsize=FONT_TICK)
+    cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
     plt.tight_layout()
     plt.show()
+
 
 # ─── ELEV×VEG PLOTS ────────────────────────────────────────────
 def boxplot_dod_by_elev_veg(y, elev, veg):
@@ -200,47 +265,62 @@ def boxplot_dod_by_elev_veg(y, elev, veg):
     ax.set_ylabel("DSD (Days)",              fontsize=FONT_LABEL)
     plt.tight_layout(); plt.show()
 
-def heat_bias_by_elev_veg(y_true, y_pred, elev, veg):
-    """
-    Elev×Veg bias grid with a colorbar whose label uses FONT_LABEL.
-    """
-    edges = [500,1000,1500,2000,2500,3000,3500,4000,4500]
-    elev_bin = np.digitize(elev, edges) - 1
-    vrange = GLOBAL_VEGRANGE
-    grid = np.full((len(edges)-1, len(vrange)), np.nan)
+def heat_bias_by_elev_veg(y_true, y_pred, elev, veg,
+                          elev_edges=(500,1000,1500,2000,2500,
+                                      3000,3500,4000,4500)):
+    bias     = y_pred - y_true
+    elev_bin = np.digitize(elev, elev_edges) - 1
+    vrange   = GLOBAL_VEGRANGE
 
-    for i in range(len(edges)-1):
+    grid = np.full((len(elev_edges)-1, len(vrange)), np.nan)
+    for i in range(len(elev_edges)-1):
         for j, v in enumerate(vrange):
-            sel = (elev_bin == i) & (veg == v)
-            if sel.any():
-                grid[i,j] = np.nanmean((y_pred - y_true)[sel])
+            m = (elev_bin == i) & (veg == v)
+            if m.any():
+                grid[i, j] = np.nanmean(bias[m])
 
-    fig, ax = plt.subplots(figsize=(8,4))
-    im = ax.imshow(grid, cmap='seismic_r', vmin=-60, vmax=60,
-                   origin='lower', aspect='auto')
+    display = np.round(grid)
+    display[np.isclose(display, 0)] = 0      # −0 → 0
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+    im = ax.imshow(np.clip(grid, -15, 15), cmap='seismic_r',
+                   vmin=-15, vmax=15, origin='lower', aspect='auto')
+
+    # cell borders + integer labels
     for i in range(grid.shape[0]):
         for j in range(grid.shape[1]):
+
             ax.add_patch(plt.Rectangle((j-0.5, i-0.5), 1, 1,
                                        ec='black', fc='none', lw=0.6))
-            if not np.isnan(grid[i,j]):
-                ax.text(j, i, f"{grid[i,j]:.0f}",
-                        ha='center', va='center', fontsize=FONT_LABEL)
+            
+            val = display[i, j]
+            if np.isnan(val):
+                continue
+
+            # ── new threshold: white if |val| ≥ 8 ───────────────
+            txt_color = 'white' if abs(val) >= 8 else 'black'
+
+            ax.text(j, i, f"{int(val):d}",
+                    ha='center', va='center',
+                    fontsize=FONT_LABEL,
+                    color=txt_color)
+
     ax.set_xticks(range(len(vrange)))
     ax.set_xticklabels([VEG_NAMES[v] for v in vrange],
                        rotation=45, ha='right', fontsize=FONT_TICK)
-    ax.set_yticks(range(len(edges)-1))
-    ax.set_yticklabels([f"{edges[i]}–{edges[i+1]} m" for i in range(len(edges)-1)],
+    ax.set_yticks(range(len(elev_edges)-1))
+    ax.set_yticklabels([f"{elev_edges[k]}–{elev_edges[k+1]} m"
+                        for k in range(len(elev_edges)-1)],
                        fontsize=FONT_TICK)
 
-    cbar = fig.colorbar(im, ax=ax, shrink=0.8)
-    cbar.ax.tick_params(labelsize=FONT_TICK)
-    cbar.set_label("Bias (Days)", fontsize=FONT_LABEL)
-
+    cb = plt.colorbar(im, ax=ax)
+    cb.ax.tick_params(labelsize=FONT_TICK)
+    cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
     plt.tight_layout()
     plt.show()
 
 # ─── FEATURE‐MATRIX HELPERS ─────────────────────────────────────
-def gather_features_nobf(ds, target="DOD"):
+def gather_features_nobf(ds, target="DSD"):
     excl = {target.lower(),'lat','lon','latitude','longitude',
             'burn_fraction','burn_cumsum'}
     ny = ds.sizes["year"]; feats={}
@@ -253,7 +333,7 @@ def gather_features_nobf(ds, target="DOD"):
             feats[v]=np.tile(da.values,(ny,1))
     return feats
 
-def flatten_nobf(ds, target="DOD"):
+def flatten_nobf(ds, target="DSD"):
     fd = gather_features_nobf(ds,target)
     names = sorted(fd)
     X = np.column_stack([fd[n].ravel(order="C") for n in names])
@@ -319,6 +399,65 @@ def lstm_unburned_experiment(X, y, cat2d, ok, ds, feat_names,
 
     # B) ALL-DATA
     yhat_all = inv(model.predict(to3D(X_all_s), batch_size=batch_size).squeeze())
+
+    # ─── NEW: pixel-wise means over all available years ──────────────
+    pix_full  = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
+    pix_valid = pix_full[ok]                      # pixel ID per sample
+    n_pix     = ds.sizes["pixel"]
+
+    obs_mean_all  = mean_per_pixel(pix_valid, Yv,        n_pix)
+    pred_mean_all = mean_per_pixel(pix_valid, yhat_all,  n_pix)
+
+    pix_plot = np.where(~np.isnan(obs_mean_all))[0]     # pixels with data
+    bias_map_ca(ds,
+                pix_plot,
+                obs_mean_all [pix_plot],    # mean observed DSD
+                pred_mean_all[pix_plot])    # mean predicted DSD
+    
+
+    # ------------------------------------------------------------------
+    # 30 % cat 0 TEST‑SET diagnostic plots  (style must match 100 % plots)
+    # ------------------------------------------------------------------
+    mask_c0_test = (cat[test_idx] == 0)          # rows that are test‑set AND c0
+    if mask_c0_test.any():
+        idx_c0_test = test_idx[mask_c0_test]     # → row indices for Xv/Yv
+        y_c0_true   = Yv[idx_c0_test]
+        y_c0_pred   = yhat_all[idx_c0_test]
+
+        # 1️⃣  plain scatter — NO title
+        plot_scatter(y_c0_true, y_c0_pred, title=None)
+
+        # 1️⃣‑bis  density‑coloured scatter (heat map, no colour‑bar)
+        plot_scatter_density_by_cat(
+            y_c0_true, y_c0_pred,
+            cat=np.zeros_like(y_c0_true, dtype=int),   # dummy all‑zero category
+            cat_idx=0
+        )
+
+        # 2️⃣  bias histogram (metrics‑only title)
+        mean = (y_c0_pred - y_c0_true).mean()
+        std  = (y_c0_pred - y_c0_true).std()
+        r2   = r2_score(y_c0_true, y_c0_pred)
+        plot_bias_hist(
+            y_c0_true, y_c0_pred,
+            title=f"Mean Bias={mean:.2f}, Bias Std={std:.2f}, R²={r2:.2f}"
+        )
+
+        # 3️⃣  pixel‑level mean‑bias map
+        obs_c0  = mean_per_pixel(pix_valid[idx_c0_test], y_c0_true, n_pix)
+        pred_c0 = mean_per_pixel(pix_valid[idx_c0_test], y_c0_pred, n_pix)
+        pix_c0  = np.where(~np.isnan(obs_c0))[0]
+        if pix_c0.size:
+            bias_map_ca(ds, pix_c0,
+                        obs_c0 [pix_c0],
+                        pred_c0[pix_c0])
+
+        # 4️⃣  Elev×Veg diagnostics (box‑plot & heat‑map)
+        elev_c0 = ds["Elevation"].values.ravel(order="C")[ok][idx_c0_test]
+        veg_c0  = ds["VegTyp"   ].values.ravel(order="C")[ok][idx_c0_test]
+        boxplot_dod_by_elev_veg(y_c0_true, elev_c0, veg_c0)
+        heat_bias_by_elev_veg  (y_c0_true, y_c0_pred, elev_c0, veg_c0)
+    
     plot_scatter_by_cat(Yv, yhat_all, cat, f"ALL DATA (thr={thr})")
     plot_bias_hist(Yv, yhat_all)
 
@@ -333,14 +472,24 @@ def lstm_unburned_experiment(X, y, cat2d, ok, ds, feat_names,
         plot_scatter(Yv[m],      yhat_all[m])
         plot_scatter_density_by_cat(Yv, yhat_all, cat, cat_idx=c)
         plot_bias_hist(Yv[m],    yhat_all[m])
-        bias_map_ca(ds, pix_valid[m], Yv[m], yhat_all[m])
+
+        # ─── NEW: pixel-wise means for **this** burn category ────────
+        obs_mean_c  = mean_per_pixel(pix_valid[m], Yv[m],        n_pix)
+        pred_mean_c = mean_per_pixel(pix_valid[m], yhat_all[m],  n_pix)
+        pix_c = np.where(~np.isnan(obs_mean_c))[0]
+
+        bias_map_ca(ds,
+                    pix_c,
+                    obs_mean_c [pix_c],     # mean observed in cat c
+                    pred_mean_c[pix_c])     # mean predicted in cat c
+        
         boxplot_dod_by_elev_veg(Yv[m], elev_all[m], veg_all[m])
         heat_bias_by_elev_veg   (Yv[m], yhat_all[m], elev_all[m], veg_all[m])
 
 if __name__=="__main__":
     log = lambda msg: print(f"[{time.time():.1f}] {msg}", flush=True)
 
-    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset4.nc")
+    ds = xr.open_dataset("/Users/yashnilmohanty/Desktop/final_dataset5.nc")
     # categories
     bc = ds["burn_cumsum"].values
     cat2d = np.zeros_like(bc, int)
@@ -351,7 +500,7 @@ if __name__=="__main__":
     log("categories computed")
 
     # build feature matrix
-    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DOD")
+    X_all, y_all, feat_names, ok = flatten_nobf(ds, "DSD")
     # set global veg range
     GLOBAL_VEGRANGE = np.unique(ds["VegTyp"].values.ravel(order="C")[ok].astype(int))
 

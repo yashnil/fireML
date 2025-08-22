@@ -2,10 +2,10 @@
 # ============================================================
 #  Fire-ML evaluation on final_dataset4.nc (Experiment 2)
 #  70 %/30 % category-split, whisker plots + uniform-scale maps
-#  burn_fraction **excluded** from predictors
+#  burn_fraction included in predictors
 # ============================================================
 
-# backed up in excludeBurnFraction/main.py
+# backed up in includeBurnFraction/main.py
 
 import time
 import requests
@@ -14,9 +14,9 @@ import numpy as np
 import numpy.random as npr
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
+from matplotlib.patches import Rectangle
 import matplotlib.ticker as mticker
 from matplotlib.cm import ScalarMappable
-import socket
 from scipy.stats import ranksums, spearmanr
 from scipy.stats import gaussian_kde
 from sklearn.ensemble import RandomForestRegressor
@@ -28,9 +28,10 @@ import cartopy.feature as cfeature
 import cartopy.io.img_tiles as cimgt
 import geopandas as gpd
 from typing import List, Dict
+import socket
 
 # ────────────────────────────────────────────────────────────
-PIX_SZ = 0.5          # 0.5-km squares
+PIX_SZ = 0.5
 CA_LON_W, CA_LON_E = -124.5, -117.5   # west, east
 CA_LAT_S, CA_LAT_N =   37,   42.5   # south, north
 FONT_LABEL  = 14
@@ -117,6 +118,7 @@ def plot_scatter(y_true, y_pred, title=None):
     plt.tight_layout()
     plt.show()
 
+
 def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx,
                                 point_size: int = 4,
                                 cmap: str = "inferno",
@@ -158,6 +160,7 @@ def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx,
     plt.tight_layout()
     plt.show()
 
+
 def plot_bias_hist(y_true, y_pred, title=None,
                    rng=(-100, 300), tick_limit: int = 100):
     """Histogram with ±100-day labelled ticks and x-axis 'Bias (Days)'."""
@@ -180,7 +183,6 @@ def plot_bias_hist(y_true, y_pred, title=None,
     ax.tick_params(labelsize=FONT_TICK)
     plt.tight_layout()
     plt.show()
-
 
 def snowfreq_from_means(wprec_mmday, wtemp_K,
                         mm_per_event=5.0,  winter_days=90.0):
@@ -247,8 +249,8 @@ def bias_hist_single(y_true, y_pred,
     ax.hist(res, bins=bins, range=rng, alpha=0.7)
     ax.axvline(mean, color='k', ls='--', lw=2)
 
-    ax.set_title(f"Mean Bias={mean:.1f},  Bias Std={std:.1f},  R²={r2:.1f}",
-                 fontsize=FONT_LABEL)
+    ax.set_title(f"Mean Bias={mean:.1f},  Bias Std={std:.1f},  R²={r2:.2f}",
+                fontsize=FONT_LABEL)
     ax.set_xlabel("Bias (Days)", fontsize=FONT_LABEL)
     ax.set_ylabel("Count",       fontsize=FONT_LABEL)
 
@@ -270,6 +272,7 @@ def _print_metrics(y_true, y_pred, tag: str):
     r2   = r2_score(y_true, y_pred)
     print(f"{tag}: N={y_true.size:5d}  RMSE={rmse:6.2f}  Bias={bias:7.2f}  R²={r2:6.3f}")
 
+
 def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
     fig, ax = plt.subplots(figsize=(6,6))
     cols = {0:'red',1:'yellow',2:'green',3:'blue'}
@@ -288,7 +291,6 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
     plt.tight_layout()
     plt.show()
 
-# --- PATCH 2 : strip units on x‑axis ---------------------------------------
 def plot_top10_features(rf, names):
     imp = rf.feature_importances_
     idx = np.argsort(imp)[::-1][:10]
@@ -301,11 +303,11 @@ def plot_top10_features(rf, names):
     )
     ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
     ax.tick_params(axis='y', labelsize=FONT_TICK)
-    plt.tight_layout(); plt.show()
+    plt.tight_layout()
+    plt.show()
 
 def plot_permutation_importance(rf, X_val, y_val, names):
-    res = permutation_importance(rf, X_val, y_val,
-                                 n_repeats=5, random_state=42)
+    res = permutation_importance(rf, X_val, y_val, n_repeats=5, random_state=42)
     imp = res.importances_mean
     idx = np.argsort(imp)[::-1][:10]
     fig, ax = plt.subplots(figsize=(8,4))
@@ -317,8 +319,8 @@ def plot_permutation_importance(rf, X_val, y_val, names):
     )
     ax.set_ylabel("Predictor Importance", fontsize=FONT_LABEL)
     ax.tick_params(axis='y', labelsize=FONT_TICK)
-    plt.tight_layout(); plt.show()
-# ---------------------------------------------------------------------------
+    plt.tight_layout()
+    plt.show()
 
 
 # ────────────────────────────────────────────────────────────
@@ -394,31 +396,33 @@ x0, y0 = merc.transform_point(CA_LON_W, CA_LAT_S, ccrs.PlateCarree())
 x1, y1 = merc.transform_point(CA_LON_E, CA_LAT_N, ccrs.PlateCarree())
 CA_EXTENT = [x0, y0, x1, y1]
 
-def add_background(ax, extent_merc=None, zoom: int = 6):
-    """
-    Paint a satellite/shaded-relief backdrop + state borders.
+from matplotlib.patches import Rectangle  # make sure this import exists
 
-    • The 2nd positional argument (*extent_merc*) is optional and ignored – it
-      is kept **only** so calls like  add_background(ax, CA_EXTENT, zoom=6)
-      do not raise “multiple values for argument 'zoom'”.
-    """
+def add_background(ax, extent_merc=None, zoom: int = 6,
+                   fade_alpha: float = 0.35, fade_color: str = "white"):
     ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N],
                   crs=ccrs.PlateCarree())
 
-    if USE_SAT:
-        try:
-            im = ax.add_image(TILER, zoom, interpolation="nearest", zorder=0)
-            try:
-                im.set_alpha(0.35)  # ← semi-transparent satellite
-            except Exception:
-                pass
-        except Exception:
-            ax.add_feature(_RELIEF, zorder=0, alpha=0.35)  # ← fallback w/ alpha
-    else:
-        ax.add_feature(_RELIEF, zorder=0, alpha=0.35)
+    # base (no alpha)
+    try:
+        ax.add_image(TILER, zoom, interpolation="nearest", zorder=0)
+    except Exception:
+        ax.add_feature(_RELIEF, zorder=0)
 
-    STATES.boundary.plot(ax=ax, linewidth=0.6,
-                         edgecolor="black", zorder=2)
+    # fade sheet above background, below data
+    ax.add_patch(
+        Rectangle(
+            (CA_LON_W, CA_LAT_S),
+            CA_LON_E - CA_LON_W,
+            CA_LAT_N - CA_LAT_S,
+            transform=ccrs.PlateCarree(),
+            facecolor=fade_color, edgecolor="none",
+            alpha=fade_alpha, zorder=1
+        )
+    )
+
+    STATES.boundary.plot(ax=ax, linewidth=0.6, edgecolor="black", zorder=2)
+
 
 def dod_map_ca(ds, pix_idx, values, title=None,
                cmap="Blues", vmin=50, vmax=250):
@@ -505,36 +509,44 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None,
 
     return sc  # return the mappable
 
-def plot_bias_maps_4panel_shared(ds, panels, vmin=-40, vmax=40, cmap="seismic_r"):
-    """
-    panels: list of 4 dicts, each like:
-      {"pix": pix_idx, "y": mean_obs_per_pix, "yp": mean_pred_per_pix, "title": "cat X"}
-    """
+from matplotlib.cm import ScalarMappable  # you already import this
+# no extra imports needed; we'll use fig.add_gridspec
+
+def plot_bias_maps_4panel_shared(ds, panels, vmin=-40, vmax=40, cmap="seismic_r",
+                                 add_titles: bool = False):
     merc = ccrs.epsg(3857)
-    fig, axs = plt.subplots(1, 4, figsize=(16, 4),
-                            subplot_kw={"projection": merc})
 
-    # Draw each panel without its own colorbar
-    for i, p in enumerate(panels):
-        bias_map_ca(ds,
-                    pix_idx=p["pix"],
-                    y_true=p["y"],
-                    y_pred=p["yp"],
-                    title=p.get("title", f"cat {i}"),
-                    vmin=vmin, vmax=vmax,
-                    ax=axs[i], add_cbar=False)
+    fig = plt.figure(figsize=(16, 4))
+    gs  = fig.add_gridspec(nrows=1, ncols=5,
+                           width_ratios=[1, 1, 1, 1, 0.06],
+                           wspace=0.02)
 
-    # One shared colorbar on the right
+    axs = [fig.add_subplot(gs[0, i], projection=merc) for i in range(4)]
+    cax = fig.add_subplot(gs[:, 4])   # ← works on all recent Matplotlib versions
+
+    # draw each map (no per-axis colorbar)
+    for i, (ax, p) in enumerate(zip(axs, panels)):
+        bias_map_ca(
+            ds,
+            pix_idx=p["pix"],
+            y_true=p["y"],
+            y_pred=p["yp"],
+            title=(p.get("title", f"cat {i}") if add_titles else None),
+            vmin=vmin, vmax=vmax,
+            ax=ax, add_cbar=False
+        )
+
+    # shared colorbar
     norm = TwoSlopeNorm(vmin=vmin, vcenter=0, vmax=vmax)
-    sm = ScalarMappable(norm=norm, cmap=cmap)
+    sm   = ScalarMappable(norm=norm, cmap=cmap)
     sm.set_array([])
-    cbar = fig.colorbar(sm, ax=axs.ravel().tolist(),
-                        location="right", fraction=0.046, pad=0.04)
+    cbar = fig.colorbar(sm, cax=cax)
     cbar.set_label("Bias (Days)", fontsize=FONT_LABEL)
     cbar.ax.tick_params(labelsize=FONT_TICK)
 
     fig.tight_layout()
     plt.show()
+
 
 # ────────────────────────────────────────────────────────────
 # 4) Elev×Veg and boxplots
@@ -668,6 +680,7 @@ def gather_features_nobf(ds, target="DSD"):
             feats[v] = np.tile(da.values, (ny,1))
     return feats
 
+
 def flatten_nobf(ds, target="DSD"):
     fd = gather_features_nobf(ds,target)
     names = sorted(fd)
@@ -693,7 +706,7 @@ def eval_bins(y, yp, burn):
 
 # ────────────────────────────────────────────────────────────
 # 7) Main RF experiment (70/30 per cat)
-def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
+def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat, snow_low5_mask=None):
     # flatten
     cat = cat2d.ravel(order='C')[ok]
     Xv, Yv = X[ok], y[ok]
@@ -745,7 +758,6 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
         m = te_nonext & (cat_te == c)
         _print_metrics(y_te[m], yhat_te[m], f"  cat {c} (non-low5, TEST)")
 
-
     # A) per-category scatter & bias-hist
     for c in (0,1,2,3):
         m = cat_te==c
@@ -795,7 +807,9 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
                 pred_mean_all[pix_plot],
                 title=None)              # uniform colour-scale ±40 set in helper
 
+
     _panels_bias = []
+
     # (b) PER-CATEGORY maps
     for c in (0, 1, 2, 3):
         mask = cat_te == c
@@ -835,7 +849,7 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
             "veg":  veg,
             "title": f"cat {c}"
         })
-    
+
     if len(_panels_heat) == 4:
         plot_heat_bias_4panel_shared(_panels_heat, vmin=-15, vmax=15)
 
@@ -879,14 +893,6 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat):
     plt.tight_layout()
     plt.show()
 
-    # --- sequential Wilcoxon on DOWN‑SAMPLED mean bias ----------
-    print("\n[DOWNSAMPLE] Wilcoxon rank‑sum on mean bias (100 runs)")
-    for a, b in [(1, 0), (2, 1), (3, 2)]:
-        if a in metrics and b in metrics:
-            s, p = ranksums(metrics[a]['bias'], metrics[b]['bias'])
-            print(f"  cat {a} vs cat {b} → stat={s:.3f}, p={p:.3g}")
-    # -------------------------------------------------------------
-
     # G) burn-fraction bins
     bf = ds["burn_fraction"].values.ravel(order='C')[ok][te_idx]
     print("\nPerformance by 10 % burn-fraction bins (Test set):")
@@ -926,7 +932,7 @@ if __name__=="__main__":
 
     # flatten
     X_all, y_all, feat_names, ok = flatten_nobf(ds, "DSD")
-    log("feature matrix ready (burn_fraction excluded)")
+    log("feature matrix ready (burn_fraction included)")
 
     # ─── snowfall-frequency proxy stratification ─────────────────
     log("building snow-event-frequency proxy from seasonal means …")
@@ -945,32 +951,31 @@ if __name__=="__main__":
     snow_low5_mask = snowfreq_vals <= snow_low5_thr     # 1-D, aligned with X_all[ok]/y_all[ok]
     print(f"[snow-proxy] 5 % = {snow_low5_thr:.2f} days; N_low5={snow_low5_mask.sum()} / {snowfreq_vals.size}")
 
-
     print(f"[snow-proxy] 33 % = {low_th:.1f} days, 67 % = {high_th:.1f} days")
 
     # run experiment
-    rf_model, exp2_bias, exp2_cat = rf_experiment_nobf(
-        X_all, y_all,         # features / target
-        cat2d, ok, ds, feat_names,
-        snow_cat              # NEW positional argument
+    rf_model, exp3_bias, exp3_cat = rf_experiment_nobf(
+        X_all, y_all, cat2d, ok, ds, feat_names,
+        snow_cat,                     # existing arg
+        snow_low5_mask=snow_low5_mask # NEW
     )
 
     import pandas as pd
     from pathlib import Path
 
     desktop = Path("/Users/yashnilmohanty/Desktop")
-    out_dir = desktop / "run2_bias_csv"
+    out_dir = desktop / "run3_bias_csv"
     out_dir.mkdir(exist_ok=True)
 
-    for c in (0,1,2,3):
-        sel = exp2_cat == c
+    for c in (0, 1, 2, 3):
+        sel = exp3_cat == c
         if not sel.any():
             continue
-        pd.DataFrame({"bias_days": exp2_bias[sel]}) \
-        .to_csv(out_dir / f"run2_bias_c{c}.csv",
-                index=False, float_format="%.6g")
-        print(f"[WRITE] {out_dir}/run2_bias_c{c}.csv  (N={sel.sum()})")
+        pd.DataFrame({"bias_days": exp3_bias[sel]}) \
+          .to_csv(out_dir / f"run3_bias_c{c}.csv",
+                  index=False, float_format="%.6g")
+        print(f"[WRITE] {out_dir}/run3_bias_c{c}.csv  (N={sel.sum()})")
 
-    print(f"[DONE]  All Experiment‑2 bias files saved in: {out_dir}")
+    print(f"[DONE] All Experiment‑3 bias files saved in: {out_dir}")
 
     log("ALL DONE (Experiment 2).")

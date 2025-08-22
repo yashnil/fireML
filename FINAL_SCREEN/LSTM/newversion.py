@@ -18,6 +18,8 @@ import cartopy.feature as cfeature
 import cartopy.io.img_tiles as cimgt
 import geopandas as gpd
 from scipy.stats import gaussian_kde
+import matplotlib.ticker as mticker
+from matplotlib.patches import Rectangle
 
 # ─── GLOBAL SETTINGS ──────────────────────────────────────────
 PIX_SZ      = 0.5          # 0.5-km squares   ← was 1
@@ -166,21 +168,51 @@ def plot_bias_hist(y_true, y_pred, title=None,
     plt.tight_layout()
     plt.show()
 
-def _add_background(ax, zoom=6):
-    ax.set_extent([CA_LON_W,CA_LON_E,CA_LAT_S,CA_LAT_N], crs=ccrs.PlateCarree())
+def _add_background(ax, zoom=6, fade_alpha=0.35, fade_color="white", alpha=None):
+    """
+    Draw satellite (or shaded relief) with a semitransparent white fade sheet
+    above it. The data sit above the fade. No title is set here.
+    """
+    # allow legacy alpha=... calls
+    if alpha is not None:
+        fade_alpha = alpha
+
+    ax.set_extent([CA_LON_W, CA_LON_E, CA_LAT_S, CA_LAT_N], crs=ccrs.PlateCarree())
+
+    # Base imagery (no alpha on tiles)
     if USE_SAT:
         try:
-            tiler = cimgt.GoogleTiles(style='satellite'); tiler.request_timeout=5
-            ax.add_image(tiler, zoom)
-        except:
-            ax.add_feature(cfeature.NaturalEarthFeature(
-                "physical","shaded_relief","10m",
-                edgecolor="none", facecolor=cfeature.COLORS["land"]), zorder=0)
+            tiler = cimgt.GoogleTiles(style='satellite')
+            tiler.request_timeout = 5
+            ax.add_image(tiler, zoom, interpolation="nearest", zorder=0)
+        except Exception:
+            ax.add_feature(
+                cfeature.NaturalEarthFeature("physical", "shaded_relief", "10m",
+                                             edgecolor="none", facecolor=cfeature.COLORS["land"]),
+                zorder=0
+            )
     else:
-        ax.add_feature(cfeature.NaturalEarthFeature(
-            "physical","shaded_relief","10m",
-            edgecolor="none", facecolor=cfeature.COLORS["land"]), zorder=0)
+        ax.add_feature(
+            cfeature.NaturalEarthFeature("physical", "shaded_relief", "10m",
+                                         edgecolor="none", facecolor=cfeature.COLORS["land"]),
+            zorder=0
+        )
+
+    # Semitransparent fade sheet above the basemap, below your data
+    ax.add_patch(
+        Rectangle(
+            (CA_LON_W, CA_LAT_S),
+            CA_LON_E - CA_LON_W,
+            CA_LAT_N - CA_LAT_S,
+            transform=ccrs.PlateCarree(),
+            facecolor=fade_color, edgecolor="none",
+            alpha=fade_alpha, zorder=1
+        )
+    )
+
+    # State outlines above the fade
     STATES.boundary.plot(ax=ax, lw=0.6, edgecolor="black", zorder=2)
+
 
 def dod_map_ca(ds, pix_idx, values, cmap="Blues", vmin=50, vmax=250):
     lat = ds["latitude"].values.ravel(); lon = ds["longitude"].values.ravel()
@@ -241,7 +273,7 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred):
                     norm=TwoSlopeNorm(vmin=-40, vcenter=0, vmax=40),
                     s=PIX_SZ, marker="s", transform=merc, zorder=3)
 
-    cb = plt.colorbar(sc, ax=ax, shrink=0.8)
+    cb = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
     cb.ax.tick_params(labelsize=FONT_TICK)
     cb.set_label("Bias (Days)", fontsize=FONT_LABEL)
     plt.tight_layout()
