@@ -34,7 +34,7 @@ from pathlib import Path
 # typing
 from typing import Dict, List, Tuple, Optional
 
-PIX_SZ = 0.5
+PIX_SZ = 1.0  # 2x larger
 STATES_SHP = "data/cb_2022_us_state_500k/cb_2022_us_state_500k.shp"
 STATES = gpd.read_file(STATES_SHP).to_crs(epsg=3857)
 # ─── California lon/lat rectangle  (PlateCarree) ─────────────
@@ -103,6 +103,7 @@ def plot_scatter(y_true, y_pred, title=None):
     """
     Simple scatter with 1:1 line, tight square axes with 5% padding.
     """
+    print(f"\n[RFR] Rendering scatter plot: Predicted vs Observed DSD")
     fig, ax = plt.subplots(figsize=(6,6))
     ax.scatter(y_pred, y_true, alpha=0.3)
     mn, mx = float(min(y_pred.min(), y_true.min())), float(max(y_pred.max(), y_true.max()))
@@ -133,6 +134,7 @@ def plot_density_scatter_by_cat(y_true, y_pred, cat, cat_idx,
     • identical axes limits & aspect ratio as the plain scatter
     • no colour-bar
     """
+    print(f"[RFR] Rendering density scatter plot: Category {cat_idx} with color-coded point density")
     m = (cat == cat_idx)
     x = y_pred[m]
     y = y_true[m]
@@ -171,6 +173,7 @@ def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
     """
     Colour‐coded scatter by burn‐category, tight square axes with 5% padding.
     """
+    print(f"\n[RFR] Rendering scatter plot: All categories colored (red=c0, yellow=c1, green=c2, blue=c3)")
     fig, ax = plt.subplots(figsize=(6,6))
     cols = {0:'red',1:'yellow',2:'green',3:'blue'}
     mn, mx = float(min(y_pred.min(), y_true.min())), float(max(y_pred.max(), y_true.max()))
@@ -202,10 +205,11 @@ def plot_bias_hist(y_true, y_pred, title=None, rng=(-100, 300),
     """
     Histogram of prediction bias with customised x-tick labelling.
 
-    • x-axis label: “Bias (Days)”
+    • x-axis label: "Bias (Days)"
     • tick labels are shown only for values within ±tick_limit
       (spacing stays the same; labels beyond are blanked)
     """
+    print(f"[RFR] Rendering bias histogram: Distribution of prediction errors")
     fig, ax = plt.subplots(figsize=(6, 4))
     res = y_pred - y_true
     ax.hist(res, bins=50, range=rng, alpha=0.7)
@@ -683,7 +687,8 @@ def mean_per_pixel(pix_idx: np.ndarray,
     return mean_val
 
 def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None,
-                vmin=-40, vmax=40, ax=None, add_cbar=True):
+                vmin=-30, vmax=30, ax=None, add_cbar=True):
+    print("[RFR] Rendering spatial bias map: California with pixel-level prediction bias (±30 days)")
     merc = ccrs.epsg(3857)
     lat = ds["latitude"].values.ravel()
     lon = ds["longitude"].values.ravel()
@@ -720,7 +725,7 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None,
 from matplotlib.cm import ScalarMappable
 from matplotlib.gridspec import GridSpec
 
-def plot_bias_maps_4panel_shared(ds, panels, vmin=-40, vmax=40, cmap="seismic_r"):
+def plot_bias_maps_4panel_shared(ds, panels, vmin=-30, vmax=30, cmap="seismic_r"):
     merc = ccrs.epsg(3857)
 
     # Create a 1x5 grid: 4 map panels + 1 narrow colorbar column
@@ -760,6 +765,7 @@ def plot_bias_maps_4panel_shared(ds, panels, vmin=-40, vmax=40, cmap="seismic_r"
 
 
 def boxplot_dod_by_elev_veg(y, elev, veg, tag=None):
+    print("[RFR] Rendering boxplot: DSD distribution by elevation bins and vegetation types")
     edges = [500,1000,1500,2000,2500,3000,3500,4000,4500]
     elev_bin = np.digitize(elev, edges)-1
     vrange, nveg = GLOBAL_VEGRANGE, len(GLOBAL_VEGRANGE)
@@ -780,6 +786,7 @@ def boxplot_dod_by_elev_veg(y, elev, veg, tag=None):
 def heat_bias_by_elev_veg(y_true, y_pred, elev, veg, tag=None,
                           elev_edges=(500,1000,1500,2000,2500,3000,3500,4000,4500),
                           vmin=-15, vmax=15, ax=None, add_cbar=True):
+    print("[RFR] Rendering heatmap: Mean bias by elevation bins and vegetation types")
     bias = y_pred - y_true
     elev_bin = np.digitize(elev, elev_edges) - 1
 
@@ -982,6 +989,10 @@ def rf_unburned_experiment(
     rf.fit(X_tr, y_tr)
 
     # ── A. unburned train / test plots ────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"[RFR] Starting plotting sequence for unburned_max_cat={thr}")
+    print(f"[RFR] Training on categories ≤ {thr}, evaluating on all categories")
+    print(f"{'='*60}")
     plot_scatter(y_tr, rf.predict(X_tr), f"Unburned TRAIN (cat ≤ {thr})")
     plot_bias_hist(y_tr, rf.predict(X_tr), f"Bias Hist: Unburned TRAIN (cat ≤ {thr})")
 
@@ -1250,7 +1261,7 @@ def rf_unburned_experiment(
             )
     
     if len(_panels_bias) == 4:
-        plot_bias_maps_4panel_shared(ds, _panels_bias, vmin=-40, vmax=40)
+        plot_bias_maps_4panel_shared(ds, _panels_bias, vmin=-30, vmax=30)
 
     if len(_panels_heat) == 4:
         plot_heat_bias_4panel_shared(_panels_heat, vmin=-15, vmax=15)

@@ -31,7 +31,7 @@ from typing import List, Dict
 import socket
 
 # ────────────────────────────────────────────────────────────
-PIX_SZ = 0.5
+PIX_SZ = 1.0  # 2x larger
 CA_LON_W, CA_LON_E = -124.5, -117.5   # west, east
 CA_LAT_S, CA_LAT_N =   37,   42.5   # south, north
 FONT_LABEL  = 14
@@ -473,7 +473,7 @@ def mean_per_pixel(pix_idx: np.ndarray,
     return mean_val
 
 def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None,
-                vmin=-40, vmax=40, ax=None, add_cbar=True):
+                vmin=-30, vmax=30, ax=None, add_cbar=True):
     """Pixel-bias map with symmetric TwoSlopeNorm; can draw into a provided axis."""
     merc = ccrs.epsg(3857)
     lat  = ds["latitude"].values.ravel()
@@ -512,7 +512,7 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred, title=None,
 from matplotlib.cm import ScalarMappable  # you already import this
 # no extra imports needed; we'll use fig.add_gridspec
 
-def plot_bias_maps_4panel_shared(ds, panels, vmin=-40, vmax=40, cmap="seismic_r",
+def plot_bias_maps_4panel_shared(ds, panels, vmin=-30, vmax=30, cmap="seismic_r",
                                  add_titles: bool = False):
     merc = ccrs.epsg(3857)
 
@@ -831,7 +831,7 @@ def rf_experiment_nobf(X, y, cat2d, ok, ds, feat_names, snow_cat, snow_low5_mask
         })
 
     if len(_panels_bias) == 4:
-        plot_bias_maps_4panel_shared(ds, _panels_bias, vmin=-40, vmax=40)
+        plot_bias_maps_4panel_shared(ds, _panels_bias, vmin=-30, vmax=30)
 
     _panels_heat = []
     # C) Elev×Veg per test-category

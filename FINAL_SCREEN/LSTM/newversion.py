@@ -22,7 +22,7 @@ import matplotlib.ticker as mticker
 from matplotlib.patches import Rectangle
 
 # ─── GLOBAL SETTINGS ──────────────────────────────────────────
-PIX_SZ      = 0.5          # 0.5-km squares   ← was 1
+PIX_SZ      = 1.0          # 1.0-km squares (2x larger)
 FONT_LABEL  = 14
 FONT_TICK   = 12
 FONT_LEGEND = 12
@@ -65,6 +65,7 @@ CA_EXTENT = [x0,y0,x1,y1]
 
 # ─── PLOTTING HELPERS ─────────────────────────────────────────
 def plot_scatter(y_true, y_pred, title=None):
+    print(f"\n[LSTM] Rendering scatter plot: Predicted vs Observed DSD")
     fig, ax = plt.subplots(figsize=(6,6))
     ax.scatter(y_pred, y_true, alpha=0.3)
     mn, mx = float(min(y_pred.min(), y_true.min())), float(max(y_pred.max(), y_true.max()))
@@ -84,6 +85,7 @@ def plot_scatter(y_true, y_pred, title=None):
     plt.tight_layout(); plt.show()
 
 def plot_scatter_by_cat(y_true, y_pred, cat, title=None):
+    print(f"\n[LSTM] Rendering scatter plot: All categories colored (red=c0, yellow=c1, green=c2, blue=c3)")
     fig, ax = plt.subplots(figsize=(6,6))
     cols = {0:'red',1:'yellow',2:'green',3:'blue'}
     mn, mx = float(min(y_pred.min(), y_true.min())), float(max(y_pred.max(), y_true.max()))
@@ -113,6 +115,7 @@ def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx,
     • identical axes / aspect as the plain scatter
     • **no colour-bar**  (per spec)
     """
+    print(f"[LSTM] Rendering density scatter plot: Category {cat_idx} with color-coded point density")
     sel = (cat == cat_idx)
     x, y = y_pred[sel], y_true[sel]
     if x.size == 0:
@@ -147,7 +150,8 @@ def plot_scatter_density_by_cat(y_true, y_pred, cat, cat_idx,
 
 def plot_bias_hist(y_true, y_pred, title=None,
                    rng=(-100, 300), tick_limit: int = 100):
-    """Histogram with ±100-day labelled ticks and x-axis “Bias (Days)”."""
+    """Histogram with ±100-day labelled ticks and x-axis "Bias (Days)"."""
+    print(f"[LSTM] Rendering bias histogram: Distribution of prediction errors")
     res = y_pred - y_true
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.hist(res, bins=50, range=rng, alpha=0.7)
@@ -255,13 +259,14 @@ def mean_per_pixel(pix_idx: np.ndarray,
     return mean_val
 
 def bias_map_ca(ds, pix_idx, y_true, y_pred):
-    """Pixel-bias map, colour-limited to ±40 days."""
+    """Pixel-bias map, colour-limited to ±30 days."""
+    print("[LSTM] Rendering spatial bias map: California with pixel-level prediction bias (±30 days)")
     merc = ccrs.epsg(3857)
     lat  = ds["latitude"].values.ravel()
     lon  = ds["longitude"].values.ravel()
     x, y = merc.transform_points(ccrs.Geodetic(),
                                  lon[pix_idx], lat[pix_idx])[:, :2].T
-    bias = np.clip(y_pred - y_true, -40, 40)
+    bias = np.clip(y_pred - y_true, -30, 30)
 
     fig, ax = plt.subplots(subplot_kw={"projection": merc}, figsize=(6, 5))
     _add_background(ax)
@@ -270,7 +275,7 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred):
 
     sc = ax.scatter(x, y, c=bias,
                     cmap="seismic_r",
-                    norm=TwoSlopeNorm(vmin=-40, vcenter=0, vmax=40),
+                    norm=TwoSlopeNorm(vmin=-30, vcenter=0, vmax=30),
                     s=PIX_SZ, marker="s", transform=merc, zorder=3)
 
     cb = plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
@@ -282,6 +287,7 @@ def bias_map_ca(ds, pix_idx, y_true, y_pred):
 
 # ─── ELEV×VEG PLOTS ────────────────────────────────────────────
 def boxplot_dod_by_elev_veg(y, elev, veg):
+    print("[LSTM] Rendering boxplot: DSD distribution by elevation bins and vegetation types")
     edges = [500,1000,1500,2000,2500,3000,3500,4000,4500]
     elev_bin = np.digitize(elev, edges) - 1
     data, labels = [], []
@@ -300,6 +306,7 @@ def boxplot_dod_by_elev_veg(y, elev, veg):
 def heat_bias_by_elev_veg(y_true, y_pred, elev, veg,
                           elev_edges=(500,1000,1500,2000,2500,
                                       3000,3500,4000,4500)):
+    print("[LSTM] Rendering heatmap: Mean bias by elevation bins and vegetation types")
     bias     = y_pred - y_true
     elev_bin = np.digitize(elev, elev_edges) - 1
     vrange   = GLOBAL_VEGRANGE
@@ -421,6 +428,10 @@ def lstm_unburned_experiment(X, y, cat2d, ok, ds, feat_names,
     def inv(a): return ysc.inverse_transform(a.reshape(-1,1)).ravel()
 
     # A) TRAIN / TEST
+    print(f"\n{'='*60}")
+    print(f"[LSTM] Starting plotting sequence for unburned_max_cat={thr}")
+    print(f"[LSTM] Training on categories ≤ {thr}, evaluating on all categories")
+    print(f"{'='*60}")
     yhat_tr = inv(model.predict(to3D(X_tr_s), batch_size=batch_size).squeeze())
     plot_scatter(y_tr, yhat_tr, f"LSTM TRAIN (cat ≤ {thr})")
     plot_bias_hist(y_tr, yhat_tr)
