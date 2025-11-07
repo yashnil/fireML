@@ -41,6 +41,43 @@ def flatten_nobf(ds, target="DSD"):
     return X, y, names, ok
 
 # ─── CLIMATE CONDITION CLASSIFICATION ──────────────────────────
+def _preferred_precip_var(ds):
+    if "aorcWinterPrecipitation" in ds.data_vars:
+        return "aorcWinterPrecipitation"
+    if "aorcWinterRain" in ds.data_vars:
+        return "aorcWinterRain"
+    for candidate in ds.data_vars:
+        lower = candidate.lower()
+        if "precip" in lower or "rain" in lower:
+            return candidate
+    raise ValueError("Could not find a precipitation variable (looked for *Precipitation or *Rain).")
+
+
+def _preferred_temp_var(ds):
+    if "aorcSpringTemperature" in ds.data_vars:
+        return "aorcSpringTemperature"
+    for candidate in ds.data_vars:
+        lower = candidate.lower()
+        if "temperature" in lower and "aorc" in lower:
+            return candidate
+    raise ValueError("Could not find a temperature variable (looked for *Temperature).")
+
+
+def _infer_calendar_years(ds):
+    if "year" in ds.coords:
+        vals = np.asarray(ds["year"].values)
+        if vals.size and np.all(np.isfinite(vals)):
+            # Assume these are already calendar years if they look like 4-digit numbers
+            if vals.min() >= 1900:
+                return vals.astype(int)
+            # If zero-based, assume starting at 2004 (dataset covers 2004–2018)
+            if vals.min() == 0 and vals.max() <= 50:
+                return (vals + 2004).astype(int)
+    # Fallback: 2004.. (for LEN years)
+    n_years = ds.sizes.get("year", 0)
+    return (np.arange(n_years) + 2004).astype(int)
+
+
 def classify_climate_conditions(ds):
     """
     Classify years into wet/cold, wet/hot, dry/cold, dry/hot based on
@@ -57,32 +94,9 @@ def classify_climate_conditions(ds):
     # and temperature is 'aorcSpringTemperature' or similar
     # We'll use winter precipitation and spring temperature as key indicators
     
-    # Try to find precipitation variables
-    precip_vars = [v for v in ds.data_vars if 'precip' in v.lower() or 'rain' in v.lower()]
-    temp_vars = [v for v in ds.data_vars if 'temp' in v.lower() and 'aorc' in v.lower()]
-    
-    if not precip_vars or not temp_vars:
-        # Fallback: use winter precipitation and spring temperature if available
-        if 'aorcWinterPrecipitation' in ds.data_vars:
-            precip_var = 'aorcWinterPrecipitation'
-        elif 'aorcWinterRain' in ds.data_vars:
-            precip_var = 'aorcWinterRain'
-        else:
-            # Use first available precipitation variable
-            precip_var = precip_vars[0] if precip_vars else None
-        
-        if 'aorcSpringTemperature' in ds.data_vars:
-            temp_var = 'aorcSpringTemperature'
-        else:
-            # Use first available temperature variable
-            temp_var = temp_vars[0] if temp_vars else None
-    else:
-        precip_var = precip_vars[0]
-        temp_var = temp_vars[0]
-    
-    if precip_var is None or temp_var is None:
-        raise ValueError("Could not find precipitation and/or temperature variables in dataset")
-    
+    precip_var = _preferred_precip_var(ds)
+    temp_var = _preferred_temp_var(ds)
+
     log(f"Using precipitation variable: {precip_var}")
     log(f"Using temperature variable: {temp_var}")
     
@@ -94,45 +108,86 @@ def classify_climate_conditions(ds):
     # Handle NaN values by taking nanmean
     precip_annual = np.nanmean(precip, axis=1)  # (year,)
     temp_annual = np.nanmean(temp, axis=1)      # (year,)
-    
-    # Calculate thresholds (median split)
-    precip_median = np.nanmedian(precip_annual)
-    temp_median = np.nanmedian(temp_annual)
-    
-    log(f"Precipitation median: {precip_median:.4f}")
-    log(f"Temperature median: {temp_median:.4f}")
-    
-    # Classify years
-    year_classes = {
-        'wet_cold': [],
-        'wet_hot': [],
-        'dry_cold': [],
-        'dry_hot': []
+
+    n_years = precip_annual.size
+    year_values = _infer_calendar_years(ds)
+
+    # Rank-based split to avoid large imbalances when values equal the median
+    precip_order = np.argsort(precip_annual)
+    temp_order = np.argsort(temp_annual)
+
+    half = n_years // 2
+    # Build z-scores for scoring
+    def _safe_std(arr):
+        sd = np.nanstd(arr)
+        return sd if sd > 0 else 1.0
+
+    precip_z = (precip_annual - np.nanmean(precip_annual)) / _safe_std(precip_annual)
+    temp_z = (temp_annual - np.nanmean(temp_annual)) / _safe_std(temp_annual)
+
+    scores = {
+        'wet_cold': precip_z - temp_z,      # wet and cold => high precip, low temp
+        'wet_hot': precip_z + temp_z,       # wet and hot
+        'dry_cold': -precip_z - temp_z,     # dry and cold
+        'dry_hot': -precip_z + temp_z,      # dry and hot
     }
-    
-    n_years = len(precip_annual)
-    for year_idx in range(n_years):
-        is_wet = precip_annual[year_idx] >= precip_median
-        is_hot = temp_annual[year_idx] >= temp_median
-        
-        if is_wet and not is_hot:
-            year_classes['wet_cold'].append(year_idx)
-        elif is_wet and is_hot:
-            year_classes['wet_hot'].append(year_idx)
-        elif not is_wet and not is_hot:
-            year_classes['dry_cold'].append(year_idx)
-        else:  # not is_wet and is_hot
-            year_classes['dry_hot'].append(year_idx)
-    
+
+    base = n_years // 4
+    remainder = n_years % 4
+    condition_order = ['wet_cold', 'wet_hot', 'dry_cold', 'dry_hot']
+    target_counts = {
+        condition: base + (1 if idx < remainder else 0)
+        for idx, condition in enumerate(condition_order)
+    }
+
+    available = set(range(n_years))
+    year_classes_idx = {condition: [] for condition in condition_order}
+
+    for condition in condition_order:
+        count_needed = target_counts[condition]
+        if count_needed <= 0:
+            continue
+        sorted_candidates = sorted(
+            list(available),
+            key=lambda idx: scores[condition][idx],
+            reverse=True
+        )
+        selected = sorted_candidates[:count_needed]
+        year_classes_idx[condition].extend(selected)
+        available -= set(selected)
+
+    if available:
+        # Assign any leftovers (due to rounding) to the condition with remaining capacity
+        for idx in list(available):
+            # choose condition with currently smallest assignment relative to target
+            deficits = {
+                condition: target_counts[condition] - len(year_classes_idx[condition])
+                for condition in condition_order
+            }
+            condition = max(deficits, key=lambda c: deficits[c])
+            year_classes_idx[condition].append(idx)
+            available.remove(idx)
+
     # Print classification summary
     log("\nClimate condition classification:")
-    for condition, years in year_classes.items():
-        log(f"  {condition}: {len(years)} years - indices {years}")
+    for condition, indices in year_classes_idx.items():
+        years_actual = [int(year_values[i]) for i in sorted(indices)]
+        log(f"  {condition}: {len(indices)} years - {years_actual}")
     
-    return year_classes, precip_annual, temp_annual
+    return year_classes_idx, year_values, precip_annual, temp_annual
 
 # ─── RANDOM FOREST EXPERIMENT WITH CLIMATE CONDITIONS ───────────
-def rf_climate_skill_experiment(X, y, cat2d, ok, ds, feat_names, year_classes, unburned_max_cat=0):
+def rf_climate_skill_experiment(
+    X,
+    y,
+    cat2d,
+    ok,
+    ds,
+    feat_names,
+    year_classes_idx,
+    year_values,
+    unburned_max_cat=0,
+):
     """
     Train Random Forest on unburned pixels and evaluate skill across climate conditions.
     """
@@ -168,59 +223,95 @@ def rf_climate_skill_experiment(X, y, cat2d, ok, ds, feat_names, year_classes, u
     # Predict on all data
     y_hat_all = rf.predict(Xv)
     
-    # Calculate metrics per climate condition
-    results = {}
+    summary_rows = []
+    per_category_rows = []
     
-    for condition, year_indices in year_classes.items():
+    for condition, year_indices in year_classes_idx.items():
         if len(year_indices) == 0:
-            results[condition] = {
+            years_str = ''
+            summary_rows.append({
+                'Climate_Condition': condition,
+                'Years': years_str,
                 'N': 0,
                 'RMSE': np.nan,
                 'Bias': np.nan,
-                'Bias_Std': np.nan,
                 'R2': np.nan,
-                'Years': ''
-            }
+            })
             continue
-        
+
+        years_actual = [int(year_values[i]) for i in sorted(year_indices)]
+        years_str = ', '.join(map(str, years_actual))
+
         # Filter samples for this climate condition
         condition_mask = np.isin(year_valid, year_indices)
-        
+
         if not condition_mask.any():
-            results[condition] = {
+            summary_rows.append({
+                'Climate_Condition': condition,
+                'Years': years_str,
                 'N': 0,
                 'RMSE': np.nan,
                 'Bias': np.nan,
-                'Bias_Std': np.nan,
                 'R2': np.nan,
-                'Years': ','.join(map(str, year_indices))
-            }
+            })
             continue
-        
+
         y_true_cond = Yv[condition_mask]
         y_pred_cond = y_hat_all[condition_mask]
         bias = y_pred_cond - y_true_cond
-        
-        results[condition] = {
+
+        summary_rows.append({
+            'Climate_Condition': condition,
+            'Years': years_str,
             'N': condition_mask.sum(),
             'RMSE': np.sqrt(mean_squared_error(y_true_cond, y_pred_cond)),
             'Bias': bias.mean(),
-            'Bias_Std': bias.std(),
             'R2': r2_score(y_true_cond, y_pred_cond),
-            'Years': ','.join(map(str, year_indices))
-        }
-    
-    # Overall metrics
-    results['overall'] = {
+        })
+
+        for c in range(4):
+            cat_mask = condition_mask & (cat == c)
+            if not cat_mask.any():
+                per_category_rows.append({
+                    'Climate_Condition': condition,
+                    'Burn_Category': f'c{c}',
+                    'Years': years_str,
+                    'N': 0,
+                    'RMSE': np.nan,
+                    'Bias': np.nan,
+                    'R2': np.nan,
+                })
+                continue
+
+            y_true_cat = Yv[cat_mask]
+            y_pred_cat = y_hat_all[cat_mask]
+            bias_cat = y_pred_cat - y_true_cat
+
+            try:
+                r2_cat = r2_score(y_true_cat, y_pred_cat)
+            except ValueError:
+                r2_cat = np.nan
+
+            per_category_rows.append({
+                'Climate_Condition': condition,
+                'Burn_Category': f'c{c}',
+                'Years': years_str,
+                'N': cat_mask.sum(),
+                'RMSE': np.sqrt(mean_squared_error(y_true_cat, y_pred_cat)),
+                'Bias': bias_cat.mean(),
+                'R2': r2_cat,
+            })
+
+    # Overall metrics across all conditions
+    overall_row = {
         'N': len(Yv),
         'RMSE': np.sqrt(mean_squared_error(Yv, y_hat_all)),
         'Bias': (y_hat_all - Yv).mean(),
-        'Bias_Std': (y_hat_all - Yv).std(),
         'R2': r2_score(Yv, y_hat_all),
         'Years': 'all'
     }
-    
-    return results
+
+    return summary_rows, per_category_rows, overall_row
 
 # ─── MAIN ──────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -233,7 +324,7 @@ if __name__ == "__main__":
     
     # Classify climate conditions
     log("\nClassifying climate conditions...")
-    year_classes, precip_annual, temp_annual = classify_climate_conditions(ds)
+    year_classes_idx, year_values, precip_annual, temp_annual = classify_climate_conditions(ds)
     
     # Compute burn categories (using 0.25 threshold)
     bc = ds["burn_cumsum"].values
@@ -246,46 +337,62 @@ if __name__ == "__main__":
     
     # Run experiment for cat 0 only
     log("\nRunning Random Forest experiment with unburned_max_cat=0")
-    results = rf_climate_skill_experiment(
+    summary_rows, per_category_rows, overall_row = rf_climate_skill_experiment(
         X_all, y_all, cat2d, ok, ds, feat_names,
-        year_classes, unburned_max_cat=0
+        year_classes_idx, year_values, unburned_max_cat=0
     )
     
-    # Convert to DataFrame
-    all_results = []
-    for condition, metrics in results.items():
-        all_results.append({
-            'Climate_Condition': condition,
-            **metrics
-        })
-    
-    df_results = pd.DataFrame(all_results)
-    
-    # Reorder columns for readability
-    df_results = df_results[['Climate_Condition', 'N', 'RMSE', 'Bias', 'Bias_Std', 'R2', 'Years']]
-    
-    # Save to CSV
-    output_file = "/Users/yashnilmohanty/Desktop/climate_skill_scores.csv"
-    df_results.to_csv(output_file, index=False)
-    log(f"\nResults saved to: {output_file}")
-    
-    # Print summary
+    df_summary = pd.DataFrame(summary_rows)
+    df_per_category = pd.DataFrame(per_category_rows)
+    df_overall = pd.DataFrame([overall_row])
+
+    summary_cols = ['Climate_Condition', 'Years', 'N', 'RMSE', 'Bias', 'R2']
+    df_summary = df_summary[summary_cols]
+    per_cat_cols = ['Climate_Condition', 'Years', 'Burn_Category', 'N', 'RMSE', 'Bias', 'R2']
+    df_per_category = df_per_category[per_cat_cols]
+    df_overall = df_overall[['Years', 'N', 'RMSE', 'Bias', 'R2']]
+
+    output_dir = "/Users/yashnilmohanty/Desktop"
+    summary_csv = f"{output_dir}/climate_skill_scores_overall.csv"
+    per_cat_csv = f"{output_dir}/climate_skill_scores_by_category.csv"
+    overall_csv = f"{output_dir}/climate_skill_scores_global.csv"
+
+    df_summary.to_csv(summary_csv, index=False)
+    df_per_category.to_csv(per_cat_csv, index=False)
+    df_overall.to_csv(overall_csv, index=False)
+
+    log(f"\nOverall climate-condition table saved to: {summary_csv}")
+    log(f"Per burn-category climate-condition table saved to: {per_cat_csv}")
+    log(f"Global metrics saved to: {overall_csv}")
+
+    # Pretty-print to console (similar to manuscript tables)
     print("\n" + "="*80)
-    print("CLIMATE CONDITION SKILL SCORE ANALYSIS")
+    print("CLIMATE CONDITION SKILL SCORE ANALYSIS – OVERALL BY CONDITION")
     print("="*80)
-    print(df_results.to_string(index=False))
+    print(df_summary.to_string(index=False))
     print("="*80)
-    
-    # Also save climate condition summary
-    climate_summary = pd.DataFrame({
-        'Year_Index': range(len(precip_annual)),
+
+    for condition, group in df_per_category.groupby("Climate_Condition"):
+        print(f"\n{condition.title()} years ({group['Years'].iloc[0]})")
+        print(group[['Burn_Category', 'N', 'RMSE', 'Bias', 'R2']].to_string(index=False))
+
+    # Also save climate condition summary (means, rankings, classification flags)
+    year_indices = np.arange(len(precip_annual))
+    climate_details = pd.DataFrame({
+        'Year_Index': year_indices,
+        'Year': [int(year_values[i]) for i in year_indices],
         'Precipitation_Mean': precip_annual,
         'Temperature_Mean': temp_annual,
-        'Precip_Above_Median': precip_annual >= np.nanmedian(precip_annual),
-        'Temp_Above_Median': temp_annual >= np.nanmedian(temp_annual)
     })
-    
-    climate_summary_file = "/Users/yashnilmohanty/Desktop/climate_condition_summary.csv"
+    climate_details['Precip_Rank'] = np.argsort(np.argsort(precip_annual))
+    climate_details['Temp_Rank'] = np.argsort(np.argsort(temp_annual))
+    climate_details['Climate_Condition'] = 'Unclassified'
+    for condition, indices in year_classes_idx.items():
+        climate_details.loc[indices, 'Climate_Condition'] = condition
+
+    climate_summary = climate_details.rename(columns={'Climate_Condition': 'Assigned_Condition'})
+
+    climate_summary_file = f"{output_dir}/climate_condition_summary.csv"
     climate_summary.to_csv(climate_summary_file, index=False)
     log(f"Climate condition summary saved to: {climate_summary_file}")
     
