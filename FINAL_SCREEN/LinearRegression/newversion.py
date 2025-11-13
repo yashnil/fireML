@@ -11,6 +11,7 @@ from matplotlib.colors import TwoSlopeNorm
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 from sklearn.metrics import mean_squared_error, r2_score
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -392,9 +393,22 @@ def linear_unburned_experiment(X, y, cat2d, ok, ds, feat_names,
     X_te_s  = scaler.transform(X_te)
     X_all_s = scaler.transform(Xv)
 
+    # PCA for multicollinearity mitigation
+    pca_full = PCA()
+    pca_full.fit(X_tr_s)
+    cumvar = np.cumsum(pca_full.explained_variance_ratio_)
+    n_components = np.searchsorted(cumvar, 0.95) + 1
+    explained_variance_percent = cumvar[n_components-1] * 100.0
+    print(f"[Linear Regression] PCA components selected: {n_components} (captures {explained_variance_percent:.2f}% of variance)")
+
+    pca = PCA(n_components=n_components)
+    X_tr_pca  = pca.fit_transform(X_tr_s)
+    X_te_pca  = pca.transform(X_te_s)
+    X_all_pca = pca.transform(X_all_s)
+
     # Build and train Linear Regression
     lr = LinearRegression()
-    lr.fit(X_tr_s, y_tr)
+    lr.fit(X_tr_pca, y_tr)
 
     # helper to invert (not needed for LR, but kept for consistency)
     def inv(a): return a
@@ -404,16 +418,16 @@ def linear_unburned_experiment(X, y, cat2d, ok, ds, feat_names,
     print(f"[Linear Regression] Starting plotting sequence for unburned_max_cat={thr}")
     print(f"[Linear Regression] Training on categories ≤ {thr}, evaluating on all categories")
     print(f"{'='*60}")
-    yhat_tr = inv(lr.predict(X_tr_s))
+    yhat_tr = inv(lr.predict(X_tr_pca))
     plot_scatter(y_tr, yhat_tr, f"Linear Regression TRAIN (cat ≤ {thr})")
     plot_bias_hist(y_tr, yhat_tr)
 
-    yhat_te = inv(lr.predict(X_te_s))
+    yhat_te = inv(lr.predict(X_te_pca))
     plot_scatter(y_te, yhat_te, f"Linear Regression TEST  (cat ≤ {thr})")
     plot_bias_hist(y_te, yhat_te)
 
     # B) ALL-DATA
-    yhat_all = inv(lr.predict(X_all_s))
+    yhat_all = inv(lr.predict(X_all_pca))
 
     # ─── NEW: pixel-wise means over all available years ──────────────
     pix_full  = np.tile(np.arange(ds.sizes["pixel"]), ds.sizes["year"])
